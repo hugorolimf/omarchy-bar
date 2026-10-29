@@ -178,7 +178,7 @@ Panel {
       if ((p.kinds || []).indexOf("bar") >= 0) continue
       var info = pluginInfo[canon(p.id)] || {}
       // overlays and menus have a window of their own to open (pickers,
-      // editors); hugo.onboarding is a guide panel
+      // editors); the onboarding guide is a panel
       var kinds = p.kinds || []
       var openable = p.enabled === true && (kinds.indexOf("overlay") >= 0 || kinds.indexOf("menu") >= 0
         || canon(p.id) === "io.github.hugorolimf.onboarding" || p.id === "community.monitor-layout")
