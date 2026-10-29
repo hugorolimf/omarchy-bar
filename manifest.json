@@ -17,7 +17,7 @@
   "omarchy": {
     "clonedFrom": "omarchy.bar"
   },
-  "version": "1.0.0",
+  "version": "1.0.1",
   "barWidget": {
     "displayName": "Island Bar tools",
     "description": "Open, pin or keep the bar's plugins in the drawer; right-click organises right on the bar",

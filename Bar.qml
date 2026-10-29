@@ -2555,7 +2555,9 @@ Item {
         var name = slot.ptTip.split(" — ")[0]
         var tip = value && name ? name + "  ·  " + value : (value || name)
         if (!tip) return
-        if (hovered && !root.barDragSource) root.showTooltip(slot, tip)
+        // slot.tooltipHovered (read by showTooltip) follows this handler's
+        // hovered only after this signal returns, so ask on the next turn.
+        if (hovered && !root.barDragSource) Qt.callLater(function() { if (moduleHover.hovered) root.showTooltip(slot, tip) })
         else root.hideTooltip(slot)
       }
     }
