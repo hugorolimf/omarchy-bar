@@ -34,10 +34,12 @@ that keeps the bar tidy.
 
 ```bash
 omarchy plugin add https://github.com/hugorolimf/omarchy-bar --enable
+omarchy bar put io.github.hugorolimf.bar --section right   # the tools button
 omarchy-restart-shell
 ```
 
-Switching bars needs one shell restart. The tools panel is drawn with
+Switching bars needs one shell restart. Enabling a bar swaps the bar in use but
+doesn't place its tools button, hence the `omarchy bar put`. The tools panel is drawn with
 [Island Kit](https://github.com/hugorolimf/omarchy-island-kit); install it too
 (the bar itself works without it, and the tools button tells you if it's missing):
 
