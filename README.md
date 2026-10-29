@@ -30,6 +30,33 @@ that keeps the bar tidy.
 - 🔄 **Drop-in.** It is Omarchy's own bar underneath, so every widget, section and
   setting you already have keeps working.
 
+## See it
+
+Recorded on a real desktop, mouse and clicks included. The bar follows the
+system language; these takes are in Portuguese.
+
+**Tips on hover**: name and value, nothing moves.
+
+![Tips on hover](assets/tips.gif)
+
+**Peek**: every value at once for four seconds (`omarchy-shell io.github.hugorolimf.bar peek`).
+
+![Peek](assets/peek.gif)
+
+**Panels**: a click opens the full panel right under its icon (sound, battery,
+weather, display).
+
+![Panels](assets/panels.gif)
+
+**Tools drawer**: search every plugin on the bar, then right-click to organise
+the islands in place.
+
+![Tools drawer](assets/drawer.gif)
+
+**Island Kit catalog**: the whole family, installed or one click away.
+
+![Catalog](assets/catalog.gif)
+
 ## Install
 
 ```bash
