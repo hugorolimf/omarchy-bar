@@ -1,11 +1,11 @@
 <div align="center">
 
-# Glass Bar
+# Island Bar
 
 **A calmer top bar for Omarchy.**
 Widgets on rounded islands, thin stroke icons, and values that slide out when you hover.
 
-![Glass Bar](preview.png)
+![Island Bar](preview.png)
 
 </div>
 
@@ -83,7 +83,7 @@ this plugin's.
 
 ## Pairs well with
 
-[Glass Clock](https://github.com/hugorolimf/omarchy-clock) ·
+[Island Clock](https://github.com/hugorolimf/omarchy-clock) ·
 [Glass Dock](https://github.com/hugorolimf/omarchy-dock) ·
 [Glass Alt+Tab](https://github.com/hugorolimf/omarchy-alttab) ·
 [Glass Notifications](https://github.com/hugorolimf/omarchy-notifications)
