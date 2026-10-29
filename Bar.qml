@@ -1943,7 +1943,7 @@ Item {
           textFormat: Text.StyledText
           anchors.centerIn: parent
           text: {
-            var t = String(root.tooltipText).replace(/&/g, "&amp;").replace(/</g, "&lt;")
+            var t = String(root.tooltipText).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
             var i = t.indexOf("  ·  ")
             return i > 0 ? "<font color='#8a8a8f'>" + t.slice(0, i) + "  ·  </font><font color='#e6e6e6'>" + t.slice(i + 5) + "</font>" : t
           }
@@ -2410,6 +2410,7 @@ Item {
                   border.color: Qt.rgba(1, 1, 1, 0.12)
                   Text {
                     id: chipText
+                    textFormat: Text.PlainText
                     anchors.centerIn: parent
                     text: "+ " + chip.modelData.name
                     color: "#a3a3a3"
@@ -2693,6 +2694,7 @@ Item {
       color: "#f5c26b"
       Text {
         id: badgeText
+        textFormat: Text.PlainText
         anchors.centerIn: parent
         text: slot.ownIcon && slot.ownIcon.badge ? String(slot.ownIcon.badge) : ""
         color: "#0b0b0b"
@@ -2704,6 +2706,7 @@ Item {
 
     Text {
       id: liveText
+      textFormat: Text.PlainText
       x: slot.baseWidth
       anchors.verticalCenter: parent.verticalCenter
       text: slot.liveLabel

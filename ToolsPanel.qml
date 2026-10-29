@@ -252,6 +252,7 @@ Panel {
             width: parent.width
             height: Style.space(30)
             Text {
+              textFormat: Text.PlainText
               anchors.verticalCenter: parent.verticalCenter
               text: root.t.title
               color: Anatomy.strong
@@ -260,6 +261,7 @@ Panel {
               font.weight: Font.DemiBold
             }
             Text {
+              textFormat: Text.PlainText
               anchors.right: parent.right
               anchors.rightMargin: Style.space(2)
               anchors.verticalCenter: parent.verticalCenter
@@ -314,6 +316,7 @@ Panel {
           }
 
           Text {
+            textFormat: Text.PlainText
             visible: root.searching && root.toolsIn("ferramentas").length + root.toolsIn("status").length + root.toolsIn("sistema").length + root.toolsIn("outros").length + root.shownBackground.length + root.shownCatalog.length === 0
             width: parent.width
             topPadding: Style.space(14)
@@ -413,6 +416,7 @@ Panel {
                     spacing: Style.space(5)
                     AnatomyIcon { anchors.verticalCenter: parent.verticalCenter; size: 12; path: "M12 6v12M6 12h12" }
                     Text {
+                      textFormat: Text.PlainText
                       anchors.verticalCenter: parent.verticalCenter
                       text: modelData.name
                       color: Anatomy.text
@@ -434,6 +438,7 @@ Panel {
           }
 
           Text {
+            textFormat: Text.PlainText
             width: parent.width
             topPadding: Style.space(10)
             bottomPadding: Style.space(2)
@@ -457,6 +462,7 @@ Panel {
     Rectangle { width: parent.width; height: 1; color: Anatomy.rule; anchors.top: parent.top; anchors.topMargin: Style.space(4) }
     Text {
       id: label
+      textFormat: Text.PlainText
       anchors.bottom: parent.bottom
       anchors.bottomMargin: Style.space(4)
       color: Anatomy.muted
@@ -466,6 +472,7 @@ Panel {
       font.letterSpacing: Anatomy.labelSpacing
     }
     Text {
+      textFormat: Text.PlainText
       visible: parent.hint !== ""
       anchors.right: parent.right
       anchors.rightMargin: Style.space(2)
@@ -534,6 +541,7 @@ Panel {
         color: Anatomy.hi
       }
       Text {
+        textFormat: Text.PlainText
         anchors.centerIn: parent
         visible: row.paths.length === 0
         text: row.name.charAt(0).toUpperCase()
@@ -554,6 +562,7 @@ Panel {
         color: Anatomy.amber
         Text {
           id: badgeText
+          textFormat: Text.PlainText
           anchors.centerIn: parent
           text: String(row.badge)
           color: "#0b0b0b"
@@ -573,6 +582,7 @@ Panel {
       spacing: 1
       opacity: row.dim ? 0.6 : 1
       Text {
+        textFormat: Text.PlainText
         width: parent.width
         text: row.name
         color: Anatomy.strong
@@ -582,6 +592,7 @@ Panel {
         elide: Text.ElideRight
       }
       Text {
+        textFormat: Text.PlainText
         width: parent.width
         visible: text !== ""
         text: row.sub
