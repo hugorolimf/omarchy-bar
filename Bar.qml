@@ -71,7 +71,7 @@ Item {
   // Resolves through fontconfig at paint time (Style.font.family defaults
   // to "monospace"), so changing the system font (via `omarchy-font-set`)
   // updates the bar without a reload.
-  // Glass Bar: the dock's typeface, so the bar and the dock read as one system.
+  // Island Bar: the dock's typeface, so the bar and the dock read as one system.
   property string fontFamily: "Adwaita Sans"
   // Bound to the central Color singleton so the bar tracks shell.toml's
   // [bar] section. Property names kept for the rest of this file's bindings.
@@ -81,7 +81,7 @@ Item {
   property color foreground: themeForeground
   property color barForeground: useTransparentForeground ? transparentForeground : themeForeground
   property bool foregroundAnimationEnabled: true
-  // Translucent; the blur toggle (see blurToggle) blurs what is behind it.
+  // Translucent; the blur toggle (blurToggle) blurs what is behind it.
   property color background: Qt.rgba(Commons.Color.bar.background.r, Commons.Color.bar.background.g, Commons.Color.bar.background.b, 0.62)
   property color urgent: Commons.Color.bar.active
 
@@ -331,7 +331,11 @@ Item {
     pluginBarApis = next
   }
 
-  onActivePopoutChanged: schedulePluginBarApiSync()
+  onActivePopoutChanged: {
+    schedulePluginBarApiSync()
+    // tools drawer: a panel just closed while the pointer is away -> fold it
+    if (!activePopout && drawerOpen && !barHovered) drawerCloseTimer.restart()
+  }
   onClickTargetsChanged: schedulePluginBarApiSync()
   onLayoutConfigChanged: schedulePluginBarApiSync()
   onModuleSlotsChanged: Qt.callLater(prunePluginBarApis)
@@ -617,6 +621,9 @@ Item {
     barConfigSerial++
   }
 
+  // Bumped when applySettingsDelta patches the layout in place (pinning a
+  // tool is such a patch), so what reads "drawer" updates without a rebuild.
+  property int layoutPatchSerial: 0
   function applySettingsDelta(delta) {
     for (var i = 0; i < delta.length; i++) {
       var change = delta[i]
@@ -629,6 +636,7 @@ Item {
         if (item && "settings" in item) item.settings = settings
       }
     }
+    layoutPatchSerial++
   }
 
   onBarConfigChanged: applyBarConfig()
@@ -836,7 +844,8 @@ Item {
     return source ? Util.fileUrl(source) : ""
   }
 
-  readonly property string blurToggle: stateHome + "/omarchy/toggles/hypr/hugorolimf-bar-blur.lua"
+  readonly property string blurToggle: (Quickshell.env("XDG_STATE_HOME") || Quickshell.env("HOME") + "/.local/state")
+    + "/omarchy/toggles/hypr/hugorolimf-bar-blur.lua"
   readonly property string blurLua: [
     "-- io.github.hugorolimf.bar: blur behind the translucent bar (layer namespace omarchy-bar).",
     "-- Written by the bar; delete this file and run hyprctl reload to turn it off.",
@@ -844,6 +853,7 @@ Item {
   ].join("\n")
   Component.onCompleted: {
     applyBarConfig()
+    // written once, and again only if it changed
     Quickshell.execDetached(["sh", "-c",
       'printf "%s\\n" "$2" | cmp -s - "$1" || { mkdir -p "$(dirname "$1")" && printf "%s\\n" "$2" > "$1" && hyprctl reload; }',
       "sh", blurToggle, blurLua])
@@ -1035,6 +1045,9 @@ Item {
     for (var i = clickTargets.length - 1; i >= 0; i--) {
       var target = clickTargets[i]
       if (!moduleTargetClickable(target)) continue
+      // Only this slot's own buttons: a tool folded into the drawer keeps its
+      // button's size at the slot next to it, and used to steal its clicks.
+      if (!itemInside(target, slot)) continue
 
       var targetPoint = { x: localX, y: localY }
       try {
@@ -1051,6 +1064,31 @@ Item {
 
     if (moduleTargetClickable(slot.activeItem)) return slot.activeItem
     return null
+  }
+
+  function clickModule(id) {
+    var screen = focusedScreenName(), pick = null
+    for (var i = 0; i < moduleSlots.length; i++) {
+      var slot = moduleSlots[i]
+      if (!slot || !slot.activeItem || slot.moduleName !== id) continue
+      if (!pick || slotScreenName(slot) === screen) pick = slot
+    }
+    if (!pick) return false
+    // the widget's own button, wherever it sits in the slot (a label beside
+    // the icon, as on the AI usage, moves it off the centre)
+    for (var k = 0; k < clickTargets.length; k++) {
+      var target = clickTargets[k]
+      if (moduleTargetClickable(target) && itemInside(target, pick)) {
+        target.triggerPress(Qt.LeftButton)
+        return true
+      }
+    }
+    return pressModuleClickTarget(pick, Qt.LeftButton, pick.width / 2, pick.height / 2)
+  }
+
+  function itemInside(item, ancestor) {
+    for (var p = item; p; p = p.parent) if (p === ancestor) return true
+    return false
   }
 
   function pressModuleClickTarget(slot, button, localX, localY) {
@@ -1154,7 +1192,7 @@ Item {
       process.running = true
   }
 
-  // Glass Bar: what each icon is and what clicking it does, in Portuguese.
+  // Island Bar: what each icon is and what clicking it does, in Portuguese.
   // Widgets that already describe themselves on hover (media, microphone,
   // keyboard layout, tray items, indicators) keep theirs, translated below.
   readonly property var ptTips: ({
@@ -1173,9 +1211,13 @@ Item {
     "omarchy.audio": "Som — clique para volume e saídas · role para ajustar · botão direito silencia",
     "omarchy.monitor": "Tela — brilho e monitores",
     "omarchy.power": "Bateria e energia — clique para detalhes e modos de energia",
-    "hugo.power": "Bateria e energia — clique para detalhes e modos de energia",
+    "io.github.hugorolimf.power": "Bateria e energia — clique para detalhes e modos de energia",
     "omarchy.tailscale": "Tailscale — rede privada",
-    "io.github.hugorolimf.clock": "Calendário — clique para abrir"
+    "io.github.hugorolimf.clock": "Calendário — clique para abrir",
+    "io.github.hugorolimf.iphone": "iPhone — clique para ver as mensagens",
+    "io.github.hugorolimf.bar": "Ferramentas — abrir e organizar os plugins da barra",
+    "io.github.hugorolimf.inbox": "Notificações — histórico agrupado por app",
+    "io.github.hugorolimf.monitores": "Organizar monitores — arrastar telas, resolução, escala e rotação"
   })
   readonly property var ptTexts: ({
     "Microphone muted": "Microfone silenciado — clique para ativar",
@@ -1188,14 +1230,25 @@ Item {
   property bool peekValues: false
   Timer { id: peekTimer; interval: 4000; onTriggered: root.peekValues = false }
   IpcHandler {
-    target: "io.github.hugorolimf.bar"
+    target: root.selfId
     function peek(): void { root.peekValues = true; peekTimer.restart() }
+    function drawer(): void { root.toggleDrawer() }
+    function organize(): void { root.toggleDrawerEdit() }
+    // The tools panel (ToolsPanel.qml) lists, pins and opens tools here.
+    function tools(): string { return JSON.stringify(root.toolsReport()) }
+    function pin(id: string, pinned: string): void { root.setInDrawer(id, pinned !== "true") }
+    function add(id: string): void { root.addToDrawer(id) }
+    function remove(id: string): void { root.removeTool(id) }
+    function openTool(id: string): void { root.openTool(id) }
+    // Same as a left click on that widget's icon on the focused monitor.
+    function click(id: string): string { return root.clickModule(id) ? "ok" : "none" }
   }
 
   // The network widget only learns the Wi-Fi name once its panel opens, so
   // ask nmcli when the network icon is hovered (or peeked), not on a timer.
   property string wifiName: ""
   function refreshWifiName() { if (!wifiProc.running) wifiProc.running = true }
+  Timer { interval: 60000; running: true; repeat: true; triggeredOnStart: true; onTriggered: root.refreshWifiName() }
   onPeekValuesChanged: if (peekValues) refreshWifiName()
   Process {
     id: wifiProc
@@ -1220,9 +1273,11 @@ Item {
       + "v" + (-(h - 2 * r)) + "a" + r + " " + r + " 0 0 1 " + r + " " + (-r) + "z"
   }
   readonly property var shapes: ({
+    bell: ["M6.5 16.5V11a5.5 5.5 0 0 1 11 0v5.5l1.5 2h-14z", "M10 20.5a2 2 0 0 0 4 0"],
     cmd: ["M9 9V6.5A2.5 2.5 0 1 0 6.5 9H17.5A2.5 2.5 0 1 0 15 6.5V17.5A2.5 2.5 0 1 0 17.5 15H6.5A2.5 2.5 0 1 0 9 17.5Z"],
     projects: [circ(6, 6, 2) + circ(6, 18, 2) + circ(18, 8, 2), "M6 8v8M18 10c0 4-6 3-11.2 6.6"],
-    agents: ["M12 3l1.6 4.4L18 9l-4.4 1.6L12 15l-1.6-4.4L6 9l4.4-1.6zM18.5 15l.7 1.8 1.8.7-1.8.7-.7 1.8-.7-1.8-1.8-.7 1.8-.7z"],
+    // Claude: its own starburst, filled, one colour like the rest
+    agents: ["M6.25 15.09L9.97 13.00L10.04 12.82L9.97 12.72L9.79 12.72L9.17 12.68L7.04 12.62L5.20 12.55L3.41 12.45L2.96 12.36L2.54 11.80L2.58 11.52L2.96 11.27L3.50 11.32L4.70 11.40L6.49 11.52L7.80 11.60L9.73 11.80L10.04 11.80L10.08 11.68L9.97 11.60L9.89 11.52L8.03 10.26L6.02 8.93L4.97 8.16L4.40 7.78L4.11 7.41L3.98 6.62L4.50 6.05L5.20 6.09L5.37 6.14L6.08 6.68L7.58 7.85L9.55 9.29L9.83 9.53L9.95 9.45L9.96 9.39L9.83 9.18L8.77 7.25L7.63 5.28L7.12 4.47L6.98 3.98C6.94 3.78 6.90 3.61 6.90 3.41L7.49 2.61L7.82 2.50L8.60 2.61L8.93 2.89L9.42 4.01L10.21 5.77L11.44 8.16L11.80 8.87L11.99 9.52L12.06 9.73L12.19 9.73L12.19 9.61L12.29 8.26L12.47 6.61L12.66 4.48L12.72 3.88L13.02 3.17L13.61 2.78L14.07 3.00L14.44 3.54L14.39 3.89L14.17 5.35L13.72 7.64L13.44 9.17L13.61 9.17L13.80 8.98L14.57 7.95L15.88 6.32L16.45 5.68L17.12 4.96L17.55 4.62L18.37 4.62L18.97 5.51L18.70 6.43L17.86 7.50L17.17 8.40L16.17 9.74L15.55 10.81L15.60 10.90L15.75 10.88L18.00 10.41L19.22 10.19L20.67 9.94L21.33 10.24L21.40 10.55L21.14 11.19L19.59 11.57L17.77 11.94L15.06 12.58L15.02 12.61L15.06 12.65L16.28 12.77L16.81 12.80L18.09 12.80L20.47 12.97L21.09 13.39L21.46 13.89L21.40 14.27L20.44 14.76L19.15 14.45L16.13 13.74L15.10 13.48L14.95 13.48L14.95 13.56L15.81 14.41L17.40 15.83L19.37 17.67L19.47 18.13L19.22 18.49L18.95 18.45L17.21 17.14L16.54 16.55L15.02 15.27L14.92 15.27L14.92 15.41L15.27 15.92L17.12 18.70L17.22 19.55L17.08 19.83L16.60 20.00L16.08 19.90L14.99 18.38L13.88 16.67L12.98 15.14L12.87 15.20L12.34 20.93L12.09 21.22L11.51 21.44L11.03 21.08L10.78 20.49L11.03 19.32L11.34 17.80L11.59 16.60L11.81 15.10L11.95 14.60L11.94 14.56L11.83 14.58L10.70 16.13L8.98 18.46L7.62 19.91L7.29 20.04L6.72 19.75L6.78 19.23L7.09 18.76L8.98 16.37L10.11 14.88L10.85 14.02L10.84 13.90L10.80 13.90L5.80 17.15L4.90 17.26L4.52 16.90L4.57 16.31L4.75 16.12L6.25 15.09L6.25 15.09Z"],
     dock: [rrect(3, 4, 18, 16, 3), "M7 16h10"],
     glass: ["M12 3.5c3 3.6 5.5 6.6 5.5 10a5.5 5.5 0 0 1-11 0c0-3.4 2.5-6.4 5.5-10z", "M9.5 14.5a2.5 2.5 0 0 0 2.5 2.5"],
     plugins: ["M10 4h4v3a2 2 0 1 0 0 4h3v4h-3a2 2 0 1 0 0 4v1h-4v-3a2 2 0 1 0-4 0v3H4v-4h1a2 2 0 1 0 0-4H4V7h6z"],
@@ -1246,8 +1301,14 @@ Item {
     speaker: ["M4 9.5h3.5L12 5.5v13l-4.5-4H4z"], wave1: ["M15.5 9.2a4 4 0 0 1 0 5.6"], wave2: ["M18 7a7 7 0 0 1 0 10"],
     mute: ["M16 9.5l5 5M21 9.5l-5 5"],
     sunCore: [circ(12, 12, 3.6)],
+    screen: [rrect(3.5, 4.5, 17, 12, 2.2), "M9.5 20h5M12 16.5V20"],
+    // two screens side by side, the arranger's
+    monitors: [rrect(2.5, 6, 9, 7, 1.6), rrect(13, 4.5, 8.5, 10, 1.6), "M5.5 16.5h3M15.5 18h3.5"],
     battery: [rrect(3, 7.5, 16, 9, 2.5), "M21 10.5v3"],
-    bolt: ["M11.8 9.2l-2 3h3l-2 3"]
+    bolt: ["M11.8 9.2l-2 3h3l-2 3"],
+    phone: [rrect(6.5, 2.5, 11, 19, 2.8), "M10.5 5h3"],
+    // two switches, one on and one off (the control-centre glyph)
+    tools: ["M8 4.5h8a3 3 0 0 1 0 6H8a3 3 0 0 1 0-6z", "M16 6.1a1.4 1.4 0 1 0 0 2.8a1.4 1.4 0 1 0 0-2.8z", "M8 13.5h8a3 3 0 0 1 0 6H8a3 3 0 0 1 0-6z", "M8 15.1a1.4 1.4 0 1 0 0 2.8a1.4 1.4 0 1 0 0-2.8z"],
   })
   function partsOf(names, alpha, fill) {
     var out = []
@@ -1259,7 +1320,7 @@ Item {
   }
   readonly property var fixedShapes: ({
     "evindor.keystroke": "cmd", "omarchy.agents": "agents", "io.github.hugorolimf.dock": "dock",
-    "io.github.fasi96.liquid-glass": "glass", "omaplug": "plugins"
+    "io.github.fasi96.liquid-glass": "glass", "omaplug": "plugins", "io.github.hugorolimf.monitores": "monitors"
   })
   // Nerd Font weather glyph of the weather widget -> our shape.
   readonly property var weatherShapes: ({
@@ -1280,13 +1341,45 @@ Item {
     return ""
   }
 
+  readonly property var clonedKinds: ["power", "audio", "network", "bluetooth", "monitor", "weather", "agents", "microphone", "media", "system-update"]
+  // Island plugins are known by their published ids (io.github.hugorolimf.*).
+  // Local hugo.* copies of them read as the published ids; the tools drawer
+  // is part of this plugin and the notification history is Island Inbox.
+  readonly property string selfId: "io.github.hugorolimf.bar"
+  readonly property var legacyIds: ({ "hugo.tools": selfId, "hugo.notifcenter": "io.github.hugorolimf.inbox" })
+  function canon(id) {
+    id = String(id || "")
+    if (legacyIds[id]) return legacyIds[id]
+    return id.indexOf("hugo.") === 0 ? "io.github.hugorolimf." + id.slice(5) : id
+  }
+  // Clones are drawn and named as their original (Island Panels' power is
+  // omarchy.power).
+  function kindOf(id) {
+    var c = canon(id)
+    var m = /^io\.github\.hugorolimf\.(.+)$/.exec(c)
+    return m && clonedKinds.indexOf(m[1]) >= 0 ? "omarchy." + m[1] : c
+  }
+
   function iconFor(id, item) {
     if (!item) return null
     try {
+      if (id === "io.github.hugorolimf.iphone") {
+        // Phone outline; the battery fills it from the bottom.
+        var bat = typeof item.battery === "number" ? item.battery : -1
+        var on = item.connected === true
+        var ph = partsOf(["phone"])
+        if (on && bat >= 0) ph = ph.concat([{ d: rrect(8.5, 17.5 - 11 * Math.min(1, bat / 100), 7, Math.max(0.6, 11 * Math.min(1, bat / 100)), 1), a: 0.85, f: true }])
+        return { key: "iphone" + (on ? Math.round(bat / 10) : "off"), tone: !on ? "dim" : bat >= 0 && bat < 10 ? "red" : bat >= 0 && bat < 20 ? "amber" : "",
+                 badge: on && item.unread > 0 ? item.unread : 0, parts: ph }
+      }
+      if (id === "io.github.hugorolimf.inbox")
+        return { key: "bell", tone: item.opened === true ? "blue" : "", badge: item.unseen > 0 ? item.unseen : 0, parts: partsOf(["bell"]) }
+      if (id === "io.github.hugorolimf.bar")
+        return { key: "tools", tone: root.drawerOpen || root.drawerEdit || item.opened === true ? "blue" : "", parts: partsOf(["tools"]) }
       if (id === "omarchy.agents") {
         var hl = item.headline
         var pc = hl && hl.percent >= 0 ? hl.percent : -1
-        return { key: "agents", always: pc >= 0, tone: pc >= 0.9 ? "red" : pc >= 0.7 ? "amber" : "", parts: partsOf(["agents"]) }
+        return { key: "agents", always: pc >= 0, tone: pc >= 0.9 ? "red" : pc >= 0.7 ? "amber" : "", parts: partsOf(["agents"], 1, true) }
       }
       if (fixedShapes[id]) return { key: fixedShapes[id], parts: partsOf([fixedShapes[id]]) }
       if (id === "omarchy.system-update") return { key: "update", tone: "amber", parts: partsOf(["update"]) }
@@ -1321,15 +1414,14 @@ Item {
         return { key: item.inUse ? "mic-live" : "mic", tone: item.inUse ? "red" : "", parts: partsOf(["mic"]) }
       }
       if (id === "omarchy.monitor") {
+        // a screen on its stand (the weather keeps the sun); the light in it
+        // grows with the brightness
         var b = item.brightnessAvailable ? item.brightnessPercent : 50
-        var len = 1 + Math.round(b / 100 * 1.5)
-        var rays = "M12 " + (5 - len) + "v" + len + "M12 19v" + len + "M" + (5 - len) + " 12h" + len + "M19 12h" + len
-          + "M" + (7.1 - len * .7) + " " + (7.1 - len * .7) + "l" + (len * .7) + " " + (len * .7)
-          + "M16.9 16.9l" + (len * .7) + " " + (len * .7) + "M" + (7.1 - len * .7) + " " + (16.9 + len * .7) + "l" + (len * .7) + " " + (-len * .7)
-          + "M16.9 7.1l" + (len * .7) + " " + (-len * .7)
-        return { key: "sun" + len, parts: partsOf(["sunCore"]).concat([{ d: rays, a: 1, f: false }]) }
+        var r = 1 + Math.round(b / 100 * 4) * 0.4
+        return { key: "screen" + Math.round(r * 10),
+                 parts: partsOf(["screen"]).concat([{ d: circ(12, 10.5, r), a: 1, f: true }]) }
       }
-      if ((id === "omarchy.power" || id === "hugo.power")) {
+      if ((id === "omarchy.power" || id === "io.github.hugorolimf.power")) {
         var d = UPower.displayDevice
         if (!d || !d.isLaptopBattery) return null
         var pct = d.percentage <= 1.0001 ? d.percentage * 100 : d.percentage
@@ -1352,12 +1444,204 @@ Item {
     return barForeground
   }
 
+  // ---- Tools drawer (the tools button) ----------------------------------
+  // Tools marked `"drawer": true` in shell.json stay off the bar until the
+  // drawer opens; it opens inside the bar (not in a separate window), so
+  // their panels still anchor under their icons. Right click on the button
+  // = organise mode: every tool gets a pin (pinned = always on the bar),
+  // and installed bar widgets that are nowhere yet show up to be added.
+  property bool drawerOpen: false
+  // Ids kept in the drawer right now ("drawer": true in the layout).
+  readonly property var drawerIds: {
+    var patched = layoutPatchSerial
+    var out = ({}), list = layoutEntries("right")
+    for (var i = 0; i < list.length; i++) {
+      var e = list[i]
+      if (e && typeof e === "object" && e.drawer) out[root.entryId(e)] = true
+    }
+    return out
+  }
+  property bool drawerEdit: false
+  function toggleDrawer() { drawerEdit = false; drawerOpen = !drawerOpen }
+  function toggleDrawerEdit() { drawerEdit = !drawerEdit; drawerOpen = drawerEdit }
+  Timer {
+    id: drawerCloseTimer
+    interval: 1500
+    onTriggered: if (!root.barHovered && !root.activePopout && !root.drawerEdit) root.drawerOpen = false
+  }
+  onBarHoveredChanged: if (!barHovered && drawerOpen) drawerCloseTimer.restart()
+
+  function setInDrawer(id, inDrawer) {
+    if (!root.shell || typeof root.shell.mutateShellConfig !== "function") return
+    root.shell.mutateShellConfig(function(config) {
+      var right = config.bar && config.bar.layout && config.bar.layout.right
+      if (!Array.isArray(right)) return
+      for (var i = 0; i < right.length; i++) {
+        var e = right[i]
+        if (e && typeof e === "object" && e.id === id) {
+          if (inDrawer) e.drawer = true
+          else delete e.drawer
+        }
+      }
+    })
+  }
+  // A widget from the catalog joins the tools group, in the drawer.
+  function addToDrawer(id) {
+    if (!root.shell || typeof root.shell.mutateShellConfig !== "function") return
+    root.shell.mutateShellConfig(function(config) {
+      var right = config.bar && config.bar.layout && config.bar.layout.right
+      if (!Array.isArray(right)) return
+      var at = -1
+      for (var i = 0; i < right.length; i++) if (right[i] && right[i].group === "ferramentas") at = i
+      right.splice(at < 0 ? right.length : at + 1, 0, { id: id, group: "ferramentas", drawer: true })
+    })
+  }
+  // Installed bar widgets placed nowhere on the bar yet (organise mode).
+  readonly property var hiddenCatalog: ["omarchy.spacer", "omarchy.clock", "omarchy.workspaces", "omarchy.menu",
+    "omarchy.active-window", "io.github.hugorolimf.bar", "omarchy.media", "yakumy.station"]
+  readonly property var drawerCatalog: drawerEdit ? catalogList() : []
+  function catalogList() {
+    var w = root.barWidgetRegistry.widgets, used = ({}), out = []
+    var sections = ["left", "center", "right"]
+    for (var s = 0; s < sections.length; s++) {
+      var list = layoutEntries(sections[s])
+      for (var i = 0; i < list.length; i++) used[root.entryId(list[i])] = true
+    }
+    for (var id in w) {
+      if (used[id] || hiddenCatalog.indexOf(root.canon(id)) >= 0) continue
+      // a clone replaces its original (Island Panels' power stands for omarchy.power)
+      var base = id.replace(/^omarchy\./, "")
+      if (used["io.github.hugorolimf." + base] || used["hugo." + base]) continue
+      var meta = w[id].metadata || {}
+      out.push({ id: id, name: String(meta.displayName || meta.name || id), desc: String(meta.description || "") })
+    }
+    out.sort(function(a, b) { return a.name.localeCompare(b.name) })
+    return out
+  }
+
+  // ---- Tools panel (ToolsPanel.qml) --------------------------------------
+  // The panel is its own plugin; what it shows and changes lives here, so it
+  // asks over IPC: every tool with its Portuguese name, what it does, its
+  // live value and the same stroke icon the bar draws.
+  // Names for widgets the hover tips do not cover.
+  readonly property var toolExtraTips: ({
+    "omarchy.microphone": "Microfone — ligar e silenciar o microfone",
+    "omarchy.keyboard-layout": "Teclado — trocar o layout do teclado",
+    "io.github.hugorolimf.island": "Ilha dinâmica — ditado, música, gravação e notificações no notch"
+  })
+  // Icons for widgets the bar draws as text (clock, keyboard, notch).
+  readonly property var toolExtraPaths: ({
+    "io.github.hugorolimf.clock": ["M12 4a8 8 0 1 0 0 16a8 8 0 1 0 0-16z", "M12 8v4l2.5 2"],
+    "omarchy.keyboard-layout": ["M4 7h16a1 1 0 0 1 1 1v8a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V8a1 1 0 0 1 1-1z", "M7 10h.01M10 10h.01M13 10h.01M16 10h.01M8 14h8"],
+    "io.github.hugorolimf.island": ["M8 9h8a3 3 0 0 1 0 6H8a3 3 0 0 1 0-6z"]
+  })
+  function toolNameDesc(id) {
+    var tip = String(tipFor(id) || extraTipFor(id) || "")
+    var cut = tip.indexOf(" — ")
+    var meta = null
+    try { meta = root.barWidgetRegistry.metadataFor(root.canonicalWidgetId(id)) } catch (e) { meta = null }
+    return {
+      name: cut >= 0 ? tip.slice(0, cut) : String((meta && (meta.displayName || meta.name)) || id),
+      desc: cut >= 0 ? tip.slice(cut + 3) : String((meta && meta.description) || "")
+    }
+  }
+  // Everything on the bar, in bar order, tagged with the island it sits in.
+  // Only island entries can be kept in the drawer (pin), and only tools can
+  // leave the bar from the panel (the rest are the system's own).
+  readonly property var toolsSkipped: ["omarchy.tray", "omarchy.indicators", "io.github.hugorolimf.bar", "omarchy.spacer"]
+  function toolsReport() {
+    var tools = [], regions = ["left", "center", "right"]
+    for (var r = 0; r < regions.length; r++) {
+      var list = layoutEntries(regions[r])
+      for (var i = 0; i < list.length; i++) {
+        var e = list[i]
+        var obj = !!e && typeof e === "object"
+        var id = root.entryId(e)
+        if (!id || toolsSkipped.indexOf(root.canon(id)) >= 0) continue
+        var group = obj && e.group ? String(e.group) : "outros"
+        var item = root.moduleWidgets(id)[0] || null
+        // clones (Island AI Usage) are drawn and named as their original
+        var kind = root.kindOf(id)
+        var icon = null, value = ""
+        try { icon = iconFor(kind, item) } catch (err) { icon = null }
+        try { value = String(liveLabel(kind, item, true) || "") } catch (err) { value = "" }
+        var cid = root.canon(id)
+        var nd = toolNameDesc(tipFor(cid) || extraTipFor(cid) ? cid : kind)
+        // hover tips speak of clicks ("clique para ver a previsão · botão
+        // direito …"); the panel wants what it does ("Ver a previsão")
+        nd.desc = nd.desc.split(" · ")[0].replace(/^(clique para|click to) (abrir$|open$)?/i, "")
+        if (cid === "io.github.hugorolimf.clock") nd.desc = tr("data, hora e o calendário do mês")
+        if (!nd.desc) nd.desc = tr("abrir")
+        nd.desc = nd.desc.charAt(0).toUpperCase() + nd.desc.slice(1)
+        var paths = []
+        if (icon && icon.parts) for (var j = 0; j < icon.parts.length; j++) paths.push(icon.parts[j].d)
+        if (paths.length === 0 && toolExtraPaths[cid]) paths = toolExtraPaths[cid]
+        if (paths.length === 0 && kind === "omarchy.weather") paths = shapes.cloud || []
+        tools.push({ id: id, name: nd.name, desc: nd.desc, group: group, value: value,
+                     pinned: !(obj && e.drawer), canPin: regions[r] === "right" && obj && !!e.group,
+                     canRemove: group === "ferramentas",
+                     badge: icon && icon.badge ? icon.badge : 0, paths: paths,
+                     fill: !!(icon && icon.parts && icon.parts.length && icon.parts[0].f) })
+      }
+    }
+    return { tools: tools, catalog: catalogList() }
+  }
+  // Off the bar entirely (still installed; the panel offers it again).
+  function removeTool(id) {
+    if (!root.shell || typeof root.shell.mutateShellConfig !== "function") return
+    root.shell.mutateShellConfig(function(config) {
+      var right = config.bar && config.bar.layout && config.bar.layout.right
+      if (!Array.isArray(right)) return
+      for (var i = right.length - 1; i >= 0; i--)
+        if (right[i] && typeof right[i] === "object" && right[i].id === id && right[i].group === "ferramentas") right.splice(i, 1)
+    })
+  }
+  // Open a tool's own panel under its icon: unfold the drawer first (a tool
+  // kept there has no width yet), then press it on the focused monitor. The
+  // drawer stays open while that panel is.
+  property string pendingTool: ""
+  function openTool(id) {
+    pendingTool = String(id || "")
+    if (!pendingTool) return
+    drawerOpen = true
+    openToolTimer.restart()
+  }
+  Timer {
+    id: openToolTimer
+    interval: 480
+    onTriggered: {
+      var id = root.pendingTool, screen = root.focusedScreenName(), pick = null
+      root.pendingTool = ""
+      for (var i = 0; i < root.moduleSlots.length; i++) {
+        var slot = root.moduleSlots[i]
+        if (!slot || !slot.activeItem || slot.moduleName !== id) continue
+        if (!pick || root.slotScreenName(slot) === screen) pick = slot
+      }
+      if (!pick) return
+      var item = pick.activeItem
+      if (typeof item.open === "function" && item.opened !== undefined) item.open()
+      else root.pressModuleClickTarget(pick, Qt.LeftButton, pick.width / 2, pick.height / 2)
+    }
+  }
+
   // Value shown beside an icon while it is hovered ("" = nothing to add).
   // Read from the widget itself where it already knows (volume, network,
   // Bluetooth, brightness) and from UPower for the battery.
   function liveLabel(id, item, hovered) {
     if (!item) return ""
     try {
+      if (id === "io.github.hugorolimf.inbox") {
+        var u = item.unseen || 0
+        return u > 0 ? u + (u === 1 ? root.tr(" nova") : root.tr(" novas")) : (hovered ? root.tr("nenhuma nova") : "")
+      }
+      if (id === "io.github.hugorolimf.iphone") {
+        if (item.connected !== true) return hovered ? root.tr("fora de alcance") : ""
+        if (!hovered) return ""
+        var parts = []
+        if (item.battery >= 0) parts.push(item.battery + "%")
+        if (item.unread > 0) parts.push(item.unread + (item.unread === 1 ? root.tr(" não lida") : root.tr(" não lidas")))
+        return parts.join(" · ")
+      }
       // AI usage (omarchy.agents): always the share of the tightest limit;
       // hovering adds the provider and when that limit resets.
       if (id === "omarchy.agents") {
@@ -1386,7 +1670,7 @@ Item {
       }
       if (id === "omarchy.monitor" && item.brightnessAvailable) return item.brightnessPercent + "%"
       if (id === "omarchy.microphone" && "muted" in item) return item.muted ? root.tr("Mudo") : root.tr("Ligado")
-      if ((id === "omarchy.power" || id === "hugo.power")) return batteryLabel()
+      if ((id === "omarchy.power" || id === "io.github.hugorolimf.power")) return batteryLabel()
     } catch (e) {}
     return ""
   }
@@ -1413,13 +1697,15 @@ Item {
     return h > 0 ? h + "h" + (m < 10 ? "0" : "") + m : m + " min"
   }
 
-  // Portuguese is the source language for the bar's own strings; anything
-  // else gets English. Widget texts are only translated for Portuguese.
+  // The bar's own strings are written in Portuguese; every other locale gets
+  // English. Texts of the widgets themselves are only translated to Portuguese.
   readonly property bool portuguese: Qt.locale().name.indexOf("pt") === 0
-  readonly property var enTips: ({"omarchy.menu": "System menu — click to open · right-click opens a terminal", "yakumy.station": "Station — synced workspaces and displays", "omarchy.weather": "Weather — click for the forecast", "techspawn.projects": "Projects — your git repos: branch, changes, pull and push", "evindor.keystroke": "Keystroke — command palette for apps and actions", "omarchy.agents": "AI agents — limits and usage for Claude, Codex and others", "io.github.hugorolimf.dock": "Dock — dock settings", "io.github.fasi96.liquid-glass": "Liquid Glass — tune the terminals' glass", "omaplug": "Plugins — enable, disable and update plugins", "omarchy.system-update": "Updates available — click to update the system", "omarchy.bluetooth": "Bluetooth — click to see and connect devices · right-click toggles it", "omarchy.network": "Wi‑Fi and network — click to see networks", "omarchy.audio": "Sound — click for volume and outputs · scroll to adjust · right-click mutes", "omarchy.monitor": "Display — brightness and monitors", "omarchy.power": "Battery and power — click for details and power modes", "hugo.power": "Battery and power — click for details and power modes", "omarchy.tailscale": "Tailscale — private network", "io.github.hugorolimf.clock": "Calendar — click to open"})
-  readonly property var enText: ({" · zera em ": " · resets in ", "Mudo": "Muted", "Cabo": "Wired", "Sem conexão": "Offline", "Conectado": "Connected", "Desligado": "Off", "Nenhum aparelho": "No devices", "Ligado": "On", " · carregando": " · charging", ", cheia em ": ", full in ", " · carregada": " · charged", " restantes": " left"})
-  function tr(text) { return portuguese ? text : (enText[text] !== undefined ? enText[text] : text) }
+  readonly property var enTips: ({"omarchy.menu": "System menu — click to open · right-click opens a terminal", "yakumy.station": "Station — synced workspaces and displays", "omarchy.weather": "Weather — click for the forecast", "techspawn.projects": "Projects — your git repos: branch, changes, pull and push", "evindor.keystroke": "Keystroke — command palette for apps and actions", "omarchy.agents": "AI agents — limits and usage for Claude, Codex and others", "io.github.hugorolimf.dock": "Dock — dock settings", "io.github.fasi96.liquid-glass": "Liquid Glass — tune the terminals' glass", "omaplug": "Plugins — enable, disable and update plugins", "omarchy.system-update": "Updates available — click to update the system", "omarchy.bluetooth": "Bluetooth — click to see and connect devices · right-click toggles it", "omarchy.network": "Wi‑Fi and network — click to see networks", "omarchy.audio": "Sound — click for volume and outputs · scroll to adjust · right-click mutes", "omarchy.monitor": "Display — brightness and monitors", "omarchy.power": "Battery and power — click for details and power modes", "io.github.hugorolimf.power": "Battery and power — click for details and power modes", "omarchy.tailscale": "Tailscale — private network", "io.github.hugorolimf.clock": "Calendar — click to open", "io.github.hugorolimf.iphone": "iPhone — click to see your messages", "io.github.hugorolimf.bar": "Tools — open and organise the bar's plugins", "io.github.hugorolimf.inbox": "Notifications — history grouped by app", "io.github.hugorolimf.monitores": "Arrange displays — drag screens, resolution, scale and rotation"})
+  readonly property var enExtraTips: ({"omarchy.microphone": "Microphone — mute and unmute the microphone", "omarchy.keyboard-layout": "Keyboard — switch the keyboard layout", "io.github.hugorolimf.island": "Island Notch — dictation, music, recording and alerts in the notch"})
+  readonly property var enText: ({" nova": " new", " novas": " new", "nenhuma nova": "nothing new", "fora de alcance": "out of range", " não lida": " unread", " não lidas": " unread", " · zera em ": " · resets in ", "Mudo": "Muted", "Cabo": "Wired", "Sem conexão": "Offline", "Conectado": "Connected", "Desligado": "Off", "Nenhum aparelho": "No devices", "Ligado": "On", " · carregando": " · charging", ", cheia em ": ", full in ", " · carregada": " · charged", " restantes": " left", "data, hora e o calendário do mês": "date, time and the month's calendar", "abrir": "open", "Na gaveta  ·  clique para fixar na barra": "In the drawer  ·  click to pin it to the bar", "Fixo na barra  ·  clique para guardar na gaveta": "Pinned to the bar  ·  click to keep it in the drawer"})
+  function tr(text) { return portuguese || enText[text] === undefined ? text : enText[text] }
   function tipFor(id) { return (portuguese ? ptTips[id] : enTips[id]) || "" }
+  function extraTipFor(id) { return (portuguese ? toolExtraTips[id] : enExtraTips[id]) || "" }
   function ptText(text) {
     if (!portuguese) return text
     return ptTexts[text] !== undefined ? ptTexts[text] : text
@@ -1639,22 +1925,31 @@ Item {
         }
       }
 
-      BorderSurface {
+      // Island Bar: anatomy tooltip — near-black card, hairline rim, the
+      // value (before "·") bright, the explanation muted.
+      Rectangle {
         id: tooltipBubble
         implicitWidth: tooltipLabel.implicitWidth + 20
-        implicitHeight: tooltipLabel.implicitHeight + 14
-        color: Commons.Color.tooltip.background
-        borderSpec: Border.surfaceSpec("tooltip", "border", Commons.Color.tooltip.border, 1)
-        radius: Style.cornerRadius
+        implicitHeight: tooltipLabel.implicitHeight + 12
+        color: Qt.rgba(0.043, 0.043, 0.043, 0.96)
+        border.width: 0.6
+        border.color: Qt.rgba(1, 1, 1, 0.09)
+        radius: 8
+        opacity: tooltipWindow.visible ? 1 : 0
+        Behavior on opacity { NumberAnimation { duration: 220; easing.type: Easing.Bezier; easing.bezierCurve: root.easeCurve } }
 
         Text {
           id: tooltipLabel
-          textFormat: Text.PlainText
+          textFormat: Text.StyledText
           anchors.centerIn: parent
-          text: root.tooltipText
-          color: Commons.Color.tooltip.text
+          text: {
+            var t = String(root.tooltipText).replace(/&/g, "&amp;").replace(/</g, "&lt;")
+            var i = t.indexOf("  ·  ")
+            return i > 0 ? "<font color='#8a8a8f'>" + t.slice(0, i) + "  ·  </font><font color='#e6e6e6'>" + t.slice(i + 5) + "</font>" : t
+          }
+          color: "#a3a3a3"
           font.family: root.fontFamily
-          font.pixelSize: Style.font.body
+          font.pixelSize: 12
           horizontalAlignment: Text.AlignHCenter
           verticalAlignment: Text.AlignVCenter
         }
@@ -2047,7 +2342,7 @@ Item {
     width: item ? item.implicitWidth : 0
     height: item ? item.implicitHeight : 0
 
-    // Glass Bar: consecutive entries sharing a "group" (shell.json) sit
+    // Island Bar: consecutive entries sharing a "group" (shell.json) sit
     // together on a rounded island; entries without one stand on their own.
     // An island whose icons are all hidden takes no room.
     Component {
@@ -2096,6 +2391,38 @@ Item {
                   required property var modelData
                   entry: modelData
                   region: moduleListRoot.region
+                }
+              }
+
+              // Organise mode: installed widgets not on the bar yet; a click
+              // adds one to the drawer.
+              Repeater {
+                model: island.modelData.group === "ferramentas" ? root.drawerCatalog : []
+                Rectangle {
+                  id: chip
+                  required property var modelData
+                  y: (islandRow.height - height) / 2
+                  height: Math.max(0, root.barSize - Style.space(12))
+                  width: chipText.implicitWidth + 14
+                  radius: height / 2
+                  color: chipMouse.containsMouse ? Qt.rgba(0.42, 0.61, 1, 0.22) : Qt.rgba(1, 1, 1, 0.05)
+                  border.width: 0.6
+                  border.color: Qt.rgba(1, 1, 1, 0.12)
+                  Text {
+                    id: chipText
+                    anchors.centerIn: parent
+                    text: "+ " + chip.modelData.name
+                    color: "#a3a3a3"
+                    font.family: root.monoFamily
+                    font.pixelSize: 10
+                  }
+                  MouseArea {
+                    id: chipMouse
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: root.addToDrawer(chip.modelData.id)
+                  }
                 }
               }
             }
@@ -2164,7 +2491,7 @@ Item {
       if (hint !== undefined && hint !== null && hint > 0) return Math.round(hint)
       return Math.max(Style.space(10), Math.round((root.vertical ? slot.height : slot.width) * 0.55))
     }
-    // Glass Bar: the widget keeps its own width (baseWidth); hovering a widget
+    // Island Bar: the widget keeps its own width (baseWidth); hovering a widget
     // with something to say (volume, network, battery...) widens the slot
     // smoothly and shows that value beside the icon (root.liveLabel).
     readonly property real baseWidth: activeItem && activeItem.visible ? (root.vertical ? root.barSize : activeItem.implicitWidth) : 0
@@ -2172,17 +2499,31 @@ Item {
     // instead of jumping
     property real shownBase: baseWidth
     Behavior on shownBase { NumberAnimation { duration: 400; easing.type: Easing.Bezier; easing.bezierCurve: root.easeCurve } }
-    readonly property string liveLabel: root.vertical ? "" : root.liveLabel(moduleName, activeItem, moduleHover.hovered || root.peekValues)
-    readonly property var ownIcon: root.vertical ? null : root.iconFor(moduleName, activeItem)
-    readonly property bool expanded: (moduleHover.hovered || root.peekValues || !!(ownIcon && ownIcon.always)) && liveLabel !== "" && !root.barDragSource
+    // Clones of Omarchy panels (Island Panels: power, audio...) keep the icon,
+    // value and tip of the panel they copy.
+    readonly property string kindId: root.kindOf(moduleName)
+    // Inline value: only labels that are always shown (AI usage) or a peek.
+    // Hovering never widens a slot: icons must stay put under the pointer
+    // (widening pushed the neighbours away while aiming at them), so the
+    // value goes into the tooltip instead.
+    readonly property string liveLabel: root.vertical ? "" : root.liveLabel(kindId, activeItem, root.peekValues)
+    readonly property var ownIcon: root.vertical ? null : root.iconFor(kindId, activeItem)
+    readonly property bool expanded: (root.peekValues || !!(ownIcon && ownIcon.always)) && liveLabel !== "" && !root.barDragSource
     property real labelRoom: expanded ? liveText.implicitWidth + Style.space(8) : 0
     Behavior on labelRoom { NumberAnimation { duration: 450; easing.type: Easing.Bezier; easing.bezierCurve: root.easeCurve } }
-    clip: labelRoom > 0 || shownBase !== baseWidth
-    implicitWidth: shownBase + labelRoom
+    clip: labelRoom > 0 || shownBase !== baseWidth || drawerShow < 1
+    // In the drawer: folded away until the drawer opens.
+    // read live from the layout: the slot's own entry is a snapshot that a
+    // pin/keep switch does not reach until the bar is rebuilt
+    readonly property bool inDrawer: !!root.drawerIds[moduleName]
+    readonly property bool isTool: !!(entry && typeof entry === "object" && entry.group === "ferramentas") && root.canon(moduleName) !== root.selfId
+    property real drawerShow: inDrawer && !root.drawerOpen && !root.drawerEdit ? 0 : 1
+    Behavior on drawerShow { NumberAnimation { duration: 420; easing.type: Easing.Bezier; easing.bezierCurve: root.easeCurve } }
+    implicitWidth: (shownBase + labelRoom) * drawerShow
     implicitHeight: activeItem && activeItem.visible ? activeItem.implicitHeight : 0
     width: implicitWidth
     height: implicitHeight
-    opacity: baseWidth > 0 ? 1 : 0
+    opacity: (baseWidth > 0 ? 1 : 0) * drawerShow * (root.drawerEdit && inDrawer ? 0.55 : 1)
     Behavior on opacity { NumberAnimation { duration: 200 } }
 
     // Soft highlight behind the hovered icon.
@@ -2206,15 +2547,19 @@ Item {
 
     HoverHandler {
       id: moduleHover
-      // Glass Bar: describe the icon in Portuguese (see root.ptTips).
+      // Island Bar: describe the icon in Portuguese (see root.ptTips).
       onHoveredChanged: {
-        if (hovered && slot.moduleName === "omarchy.network") root.refreshWifiName()
-        if (!slot.ptTip) return
-        if (hovered && !root.barDragSource) root.showTooltip(slot, slot.ptTip)
+        if (hovered && slot.kindId === "omarchy.network") root.refreshWifiName()
+        // Short on hover ("Wi-Fi  ·  I.Rolim5G"); the click opens the full panel.
+        var value = hovered ? root.liveLabel(slot.kindId, slot.activeItem, true) : ""
+        var name = slot.ptTip.split(" — ")[0]
+        var tip = value && name ? name + "  ·  " + value : (value || name)
+        if (!tip) return
+        if (hovered && !root.barDragSource) root.showTooltip(slot, tip)
         else root.hideTooltip(slot)
       }
     }
-    readonly property string ptTip: root.tipFor(moduleName)
+    readonly property string ptTip: root.tipFor(kindId) || root.tipFor(root.canon(moduleName))
     readonly property bool tooltipHovered: moduleHover.hovered
 
     BorderSurface {
@@ -2236,6 +2581,9 @@ Item {
       anchors.bottom: parent.bottom
       width: slot.baseWidth
       opacity: slot.ownIcon ? 0 : (slot.dragSource ? 0.22 : 1.0)
+      // folded into the drawer: hidden, and its button must not take clicks
+      // meant for its neighbours (clip hides it, input still reached it)
+      enabled: slot.drawerShow > 0.5
       onLoaded: {
         slot.injectProps()
         Qt.callLater(slot.injectProps)
@@ -2251,6 +2599,9 @@ Item {
       anchors.bottom: parent.bottom
       width: slot.baseWidth
       opacity: slot.ownIcon ? 0 : (slot.dragSource ? 0.22 : 1.0)
+      // folded into the drawer: hidden, and its button must not take clicks
+      // meant for its neighbours (clip hides it, input still reached it)
+      enabled: slot.drawerShow > 0.5
       onLoaded: {
         slot.injectProps()
         Qt.callLater(slot.injectProps)
@@ -2266,30 +2617,12 @@ Item {
       anchors.bottom: parent.bottom
       width: slot.baseWidth
       opacity: slot.ownIcon ? 0 : (slot.dragSource ? 0.22 : 1.0)
+      // folded into the drawer: hidden, and its button must not take clicks
+      // meant for its neighbours (clip hides it, input still reached it)
+      enabled: slot.drawerShow > 0.5
       onLoaded: {
         slot.injectProps()
         Qt.callLater(slot.injectProps)
-      }
-    }
-
-    // Glass Bar: the weather opens as a card in the notch (Glass Island,
-    // Dynamic Island style). If the notch can't (not installed yet, or the
-    // call fails), the weather's own panel opens as before.
-    MouseArea {
-      visible: slot.moduleName === "omarchy.weather" && !root.vertical
-      anchors.fill: parent
-      acceptedButtons: Qt.LeftButton
-      cursorShape: Qt.PointingHandCursor
-      onClicked: islandCard.running = true
-    }
-    Process {
-      id: islandCard
-      command: ["omarchy-shell", "io.github.hugorolimf.island", "card", "weather"]
-      onExited: function(code) {
-        if (code === 0) return
-        var w = slot.activeItem
-        if (w && typeof w.togglePanel === "function") w.togglePanel()
-        else if (w && typeof w.open === "function") w.open()
       }
     }
 
@@ -2505,13 +2838,44 @@ Item {
       }
     }
 
+    // Organise mode: the whole icon becomes the switch (it does not open its
+    // panel meanwhile). A dot under it says where it lives, like the dock's:
+    // filled blue = pinned on the bar, hollow ring = kept in the drawer.
+    Rectangle {
+      visible: root.drawerEdit && slot.isTool && slot.baseWidth > 0
+      z: 100
+      width: 6
+      height: 6
+      radius: 3
+      x: (slot.baseWidth - width) / 2
+      y: slot.height - height - 1
+      color: slot.inDrawer ? "transparent" : "#6b9bff"
+      border.width: 1
+      border.color: slot.inDrawer ? Qt.rgba(1, 1, 1, 0.55) : "#6b9bff"
+    }
+    MouseArea {
+      visible: root.drawerEdit && slot.isTool && slot.baseWidth > 0
+      z: 101
+      x: 0
+      width: slot.baseWidth
+      height: slot.height
+      hoverEnabled: true
+      cursorShape: Qt.PointingHandCursor
+      onEntered: root.showTooltip(slot, root.tr(slot.inDrawer ? "Na gaveta  ·  clique para fixar na barra" : "Fixo na barra  ·  clique para guardar na gaveta"))
+      onExited: root.hideTooltip(slot)
+      onClicked: root.setInDrawer(slot.moduleName, !slot.inDrawer)
+    }
+
     onActiveItemChanged: Qt.callLater(injectProps)
     onModuleSettingsChanged: injectProps()
 
     function injectProps() {
       var target = activeItem
       if (!target) return
-      if ("bar" in target) target.bar = firstParty
+      // The tools button is part of this bar (its panel and drawer), so it gets the
+      // bar itself like first-party widgets, not the narrowed plugin API.
+      var cid = root.canon(moduleName)
+      if ("bar" in target) target.bar = firstParty || cid === root.selfId || cid === "io.github.hugorolimf.inbox"
         ? root : root.pluginBarApiFor(pluginApiId, moduleName, registered)
       if ("moduleName" in target) target.moduleName = moduleName
       if ("settings" in target) target.settings = moduleSettings

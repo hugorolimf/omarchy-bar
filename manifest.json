@@ -5,15 +5,24 @@
   "author": "Hugo Rolim Filho",
   "license": "MIT",
   "homepage": "https://github.com/hugorolimf/omarchy-bar",
-  "description": "A calmer top bar for Omarchy: widgets grouped on rounded islands, thin stroke icons that only use colour to say something, and values that slide out on hover (volume, Wi‑Fi, battery time, AI usage)",
+  "description": "A calmer top bar for Omarchy: widgets on rounded islands, thin stroke icons that only use colour to say something, short tips on hover, and a tools drawer that keeps the bar tidy",
   "kinds": [
-    "bar"
+    "bar",
+    "bar-widget"
   ],
   "entryPoints": {
-    "bar": "Bar.qml"
+    "bar": "Bar.qml",
+    "barWidget": "ToolsWidget.qml"
   },
   "omarchy": {
     "clonedFrom": "omarchy.bar"
   },
-  "version": "1.0.0"
+  "version": "1.0.0",
+  "barWidget": {
+    "displayName": "Island Bar tools",
+    "description": "Open, pin or keep the bar's plugins in the drawer; right-click organises right on the bar",
+    "category": "Workflow",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
 }
