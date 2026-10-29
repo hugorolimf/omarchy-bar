@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.hugorolimf.bar",
+  "name": "Glass Bar",
+  "author": "Hugo Rolim Filho",
+  "license": "MIT",
+  "homepage": "https://github.com/hugorolimf/omarchy-bar",
+  "description": "A calmer top bar for Omarchy: widgets grouped on rounded islands, thin stroke icons that only use colour to say something, and values that slide out on hover (volume, Wi‑Fi, battery time, AI usage)",
+  "kinds": [
+    "bar"
+  ],
+  "entryPoints": {
+    "bar": "Bar.qml"
+  },
+  "omarchy": {
+    "clonedFrom": "omarchy.bar"
+  },
+  "version": "1.0.0"
+}

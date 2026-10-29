@@ -1,0 +1,2588 @@
+import Quickshell
+import Quickshell.Hyprland
+import Quickshell.Io
+import Quickshell.Wayland
+import Quickshell.Services.UPower
+import QtQuick
+import QtQuick.Layouts
+import QtQuick.Shapes
+import qs.Commons
+import qs.Commons as Commons
+import qs.Ui
+import "BarModel.js" as BarModel
+
+Item {
+  id: root
+
+  // The omarchy-shell host injects omarchyPath from OMARCHY_PATH.
+  property string omarchyPath: Quickshell.env("OMARCHY_PATH")
+  // Injected by the host shell so bar slots can resolve enabled widgets.
+  property var barWidgetRegistry: fallbackBarWidgetRegistry
+  // Read-only registry view for third-party full bars; the built-in bar does
+  // not otherwise need it, but declaring it keeps clone construction atomic.
+  property var pluginRegistry: null
+  // Injected by the host shell every time shell.json is reloaded. Holds the
+  // `bar:` subtree: position, centerAnchor, layout. The host owns file IO;
+  // the bar just renders whatever it's handed. The bar font follows the
+  // OS-level fontconfig monospace binding — it is not stored in shell.json.
+  property var barConfig: ({})
+  // Injected by the host shell. Used for shell-wide actions such as opening
+  // settings and persisting inline widget state.
+  property var shell: null
+  // Manifest for the active bar option. Present for custom bars and useful for
+  // diagnostics; the built-in bar does not otherwise need it.
+  property var manifest: null
+  QtObject {
+    id: fallbackBarWidgetRegistry
+    property var widgets: ({})
+    property int revision: 0
+    function metadataFor(id) { return null }
+  }
+  // Mirrors the on-disk `bar-off` flag so the user can hide the bar without
+  // killing the entire shell. Hidden panels stay mapped but park off-screen
+  // without an exclusion zone; updated by the FileView watcher further down.
+  property bool barHidden: false
+  property string home: Quickshell.env("HOME")
+  property string stateHome: home + "/.local/state"
+  property string omarchyConfigDir: home + "/.config/omarchy"
+  property var fallbackBarConfig: ({
+    position: "top",
+    transparent: false,
+    centerAnchor: "omarchy.clock",
+    layout: { left: [], center: [], right: [] }
+  })
+  property var layoutConfig: fallbackBarConfig.layout
+  property string centerAnchor: ""
+  property bool requestedTransparent: false
+  property bool useTransparentForeground: false
+  property bool transparent: false
+  property bool centerSectionHovered: false
+  // One bar surface exists per monitor and each reports into this count, so a
+  // pointer crossing from one monitor's bar to another's stays counted however
+  // the enter and leave interleave. A single shared bool would be left false by
+  // whichever event landed last.
+  property int barHoverCount: 0
+  // True while the pointer is over any bar, widgets included.
+  readonly property bool barHovered: barHoverCount > 0
+  property bool centerSectionRevealHeld: false
+  property bool centerHoverRevealSuppressed: false
+  property int barConfigSerial: 0
+  property string position: "top"
+  // Resolves through fontconfig at paint time (Style.font.family defaults
+  // to "monospace"), so changing the system font (via `omarchy-font-set`)
+  // updates the bar without a reload.
+  // Glass Bar: the dock's typeface, so the bar and the dock read as one system.
+  property string fontFamily: "Adwaita Sans"
+  // Bound to the central Color singleton so the bar tracks shell.toml's
+  // [bar] section. Property names kept for the rest of this file's bindings.
+  property color themeForeground: Commons.Color.bar.text
+  property color themeContrastForeground: Commons.Color.background
+  property color transparentForeground: Commons.Color.bar.text
+  property color foreground: themeForeground
+  property color barForeground: useTransparentForeground ? transparentForeground : themeForeground
+  property bool foregroundAnimationEnabled: true
+  // Translucent; the blur toggle (see blurToggle) blurs what is behind it.
+  property color background: Qt.rgba(Commons.Color.bar.background.r, Commons.Color.bar.background.g, Commons.Color.bar.background.b, 0.62)
+  property color urgent: Commons.Color.bar.active
+
+  Behavior on barForeground { enabled: root.foregroundAnimationEnabled; ColorAnimation { duration: 420; easing.type: Easing.InOutCubic } }
+  Behavior on background { ColorAnimation { duration: 420; easing.type: Easing.InOutCubic } }
+  Behavior on urgent { ColorAnimation { duration: 420; easing.type: Easing.InOutCubic } }
+  property var tooltipTarget: null
+  property var pendingTooltipTarget: null
+  property string tooltipText: ""
+  property string pendingTooltipText: ""
+  property bool tooltipShown: false
+  property int tooltipRequest: 0
+  property var activePopout: null
+  property var barDragSource: null
+  property var barDragTarget: null
+  property var barDragTargetGeometry: null
+  property bool barDragAfter: false
+  property var barDragWindow: null
+  property var barDragScreen: null
+  property url barDragImageUrl: ""
+  property real barDragSceneX: 0
+  property real barDragSceneY: 0
+  property real barDragScreenX: 0
+  property real barDragScreenY: 0
+  property real barDragOffsetX: 0
+  property real barDragOffsetY: 0
+  property bool barMoveActive: false
+  property string barMoveCandidate: ""
+  property var barMoveWindow: null
+  property var barMoveScreen: null
+  property var clickTargets: []
+  property var moduleSlots: []
+  property var pluginBarApis: ({})
+  // target -> { target, pluginId, clickTarget, popout }. Keyed by object so a
+  // registration edits one entry in place instead of copying and rescanning an
+  // array in QML; Qt's Map still finds a key by a native linear scan.
+  readonly property var pluginObjectOwners: new Map()
+  property bool pluginBarApiSyncQueued: false
+
+  Component {
+    id: pluginBarApiComponent
+    PluginBarApi { }
+  }
+
+  function publicLayoutConfig() {
+    return JSON.parse(JSON.stringify(root.layoutConfig || {}))
+  }
+
+  function bindPluginBarApi(api) {
+    if (!api) return
+    api.foreground = Qt.binding(function() { return root.foreground })
+    api.barForeground = Qt.binding(function() { return root.barForeground })
+    api.background = Qt.binding(function() { return root.background })
+    api.urgent = Qt.binding(function() { return root.urgent })
+    api.fontFamily = Qt.binding(function() { return root.fontFamily })
+    api.position = Qt.binding(function() { return root.position })
+    api.vertical = Qt.binding(function() { return root.vertical })
+    api.barSize = Qt.binding(function() { return root.barSize })
+    api.transparent = Qt.binding(function() { return root.transparent })
+    api.foregroundAnimationEnabled = Qt.binding(function() { return root.foregroundAnimationEnabled })
+    api.centerSectionRevealHeld = Qt.binding(function() { return root.centerSectionRevealHeld })
+    api._centerHoverRevealSuppressed = Qt.binding(function() { return root.centerHoverRevealSuppressed })
+    root.syncPluginBarApiObjects(api)
+  }
+
+  // Each api keeps its own detached copy of the layout. A flush serialises
+  // the layout once and passes the string in so it is not re-serialised for
+  // every plugin.
+  function syncPluginBarApiObjects(api, layoutSnapshot) {
+    if (!api) return
+    api.activePopout = root.pluginOwnsBarObject(api.pluginId, root.activePopout)
+      ? root.activePopout : (root.activePopout ? api.foreignPopoutMarker : null)
+    api.clickTargets = root.pluginClickTargets(api.pluginId)
+    api.layoutConfig = layoutSnapshot !== undefined
+      ? JSON.parse(layoutSnapshot) : root.publicLayoutConfig()
+  }
+
+  function pluginObjectRecord(target) {
+    return target ? (pluginObjectOwners.get(target) || null) : null
+  }
+
+  function markPluginObject(pluginId, target, role) {
+    var key = String(pluginId || "")
+    if (!key || !target) return false
+    var record = root.pluginObjectRecord(target)
+    if (record && record.pluginId !== key) return false
+    if (!record) {
+      record = { target: target, pluginId: key, clickTarget: false, popout: false }
+      pluginObjectOwners.set(target, record)
+    }
+    record[role] = true
+    return true
+  }
+
+  function unmarkPluginObject(pluginId, target, role) {
+    var key = String(pluginId || "")
+    var record = root.pluginObjectRecord(target)
+    if (!record || record.pluginId !== key) return
+    record[role] = false
+    if (!record.clickTarget && !record.popout) pluginObjectOwners.delete(target)
+  }
+
+  function pluginOwnsBarObject(pluginId, target) {
+    var record = target ? root.pluginObjectRecord(target) : null
+    return !!record && record.pluginId === String(pluginId || "")
+  }
+
+  function pluginClickTargets(pluginId) {
+    var out = []
+    for (var i = 0; i < root.clickTargets.length; i++) {
+      var target = root.clickTargets[i]
+      if (root.pluginOwnsBarObject(pluginId, target)) out.push(target)
+    }
+    return out
+  }
+
+  // Every click target registration, popout change and layout change used to
+  // resync every plugin api synchronously. Startup alone is hundreds of
+  // registrations, each walking every api and every target, so coalesce them
+  // into one resync per event-loop turn (as onModuleSlotsChanged already does
+  // for prunePluginBarApis). bindPluginBarApi still syncs a brand-new api
+  // directly so a widget never sees an empty api on its first read.
+  function schedulePluginBarApiSync() {
+    if (pluginBarApiSyncQueued) return
+    pluginBarApiSyncQueued = true
+    Qt.callLater(root.syncAllPluginBarApiObjects)
+  }
+
+  function syncAllPluginBarApiObjects() {
+    pluginBarApiSyncQueued = false
+    var layoutSnapshot = JSON.stringify(root.layoutConfig || {})
+    for (var id in pluginBarApis) {
+      var api = pluginBarApis[id]
+      if (api) root.syncPluginBarApiObjects(api, layoutSnapshot)
+    }
+  }
+
+  function registerPluginClickTarget(pluginId, target) {
+    if (!root.markPluginObject(pluginId, target, "clickTarget")) return
+    root.registerClickTarget(target)
+  }
+
+  function unregisterPluginClickTarget(pluginId, target) {
+    if (!root.pluginOwnsBarObject(pluginId, target)) return
+    root.unregisterClickTarget(target)
+    root.unmarkPluginObject(pluginId, target, "clickTarget")
+  }
+
+  // A plugin may read api.activePopout right after asking for its popout, so
+  // its own api is brought up to date inline; everyone else waits for the
+  // coalesced resync.
+  function requestPluginPopout(pluginId, owner) {
+    if (!root.markPluginObject(pluginId, owner, "popout")) return
+    root.requestPopout(owner)
+    root.syncPluginBarApiObjects(pluginBarApis[String(pluginId || "")])
+  }
+
+  function releasePluginPopout(pluginId, owner) {
+    if (!root.pluginOwnsBarObject(pluginId, owner)) return
+    root.releasePopout(owner)
+    root.unmarkPluginObject(pluginId, owner, "popout")
+    root.syncPluginBarApiObjects(pluginBarApis[String(pluginId || "")])
+  }
+
+  function pluginBarApiFor(pluginId, moduleName, registered) {
+    var key = String(pluginId || "")
+    if (!key) return null
+
+    var pluginShell = null
+    if (registered && root.shell && typeof root.shell.pluginShellForId === "function") {
+      // Only the trusted built-in bar receives ShellRoot and can request a
+      // service-capable facade for the widget it is instantiating.
+      pluginShell = root.shell.pluginShellForId(moduleName)
+    } else if (root.shell && typeof root.shell.pluginShellForBarEntry === "function") {
+      // Replacement bars receive a service-less entry facade. Giving an
+      // untrusted bar a generic facade factory would let it retrieve another
+      // third-party plugin's live service object.
+      pluginShell = root.shell.pluginShellForBarEntry(key, moduleName)
+    }
+
+    if (pluginBarApis[key]) {
+      pluginBarApis[key].shell = pluginShell
+      return pluginBarApis[key]
+    }
+
+    var api = pluginBarApiComponent.createObject(null, {
+      pluginId: key,
+      moduleName: String(moduleName || ""),
+      shell: pluginShell,
+      _showTooltip: function(target, text) { root.showTooltip(target, text) },
+      _hideTooltip: function(target) { root.hideTooltip(target) },
+      _registerClickTarget: function(target) { root.registerPluginClickTarget(key, target) },
+      _unregisterClickTarget: function(target) { root.unregisterPluginClickTarget(key, target) },
+      _requestPopout: function(owner) { root.requestPluginPopout(key, owner) },
+      _releasePopout: function(owner) { root.releasePluginPopout(key, owner) },
+      _switchPanelFrom: function(owner, direction) { return root.switchPanelFrom(owner, direction) },
+      _targetBelongsToWindow: function(target, window) { return root.targetBelongsToWindow(target, window) },
+      _moduleWidgets: function(requestedId) {
+        return String(requestedId || "") === String(moduleName || "")
+          ? root.moduleWidgets(moduleName) : []
+      },
+      _run: function(command) { root.run(command) },
+      _setCenterHoverRevealSuppressed: function(value) {
+        root.centerHoverRevealSuppressed = !!value
+      }
+    })
+    if (!api) return null
+    root.bindPluginBarApi(api)
+
+    var next = ({})
+    for (var id in pluginBarApis) next[id] = pluginBarApis[id]
+    next[key] = api
+    pluginBarApis = next
+    return api
+  }
+
+  function pluginBarApiUsed(pluginId) {
+    for (var i = 0; i < moduleSlots.length; i++) {
+      var slot = moduleSlots[i]
+      if (slot && slot.pluginApiId === pluginId) return true
+    }
+    return false
+  }
+
+  function releasePluginObjects(pluginId) {
+    var owned = Array.from(pluginObjectOwners.values())
+    for (var i = 0; i < owned.length; i++) {
+      var record = owned[i]
+      if (!record || record.pluginId !== pluginId) continue
+      if (record.clickTarget) root.unregisterClickTarget(record.target)
+      if (record.popout && root.activePopout === record.target) root.releasePopout(record.target)
+      pluginObjectOwners.delete(record.target)
+    }
+  }
+
+  function prunePluginBarApis() {
+    var next = ({})
+    for (var id in pluginBarApis) {
+      var api = pluginBarApis[id]
+      if (root.pluginBarApiUsed(id)) {
+        next[id] = api
+        continue
+      }
+      root.releasePluginObjects(id)
+      if (api && typeof api.destroy === "function") api.destroy()
+    }
+    pluginBarApis = next
+  }
+
+  onActivePopoutChanged: schedulePluginBarApiSync()
+  onClickTargetsChanged: schedulePluginBarApiSync()
+  onLayoutConfigChanged: schedulePluginBarApiSync()
+  onModuleSlotsChanged: Qt.callLater(prunePluginBarApis)
+
+  Component.onDestruction: {
+    for (var id in pluginBarApis) {
+      root.releasePluginObjects(id)
+      if (pluginBarApis[id] && typeof pluginBarApis[id].destroy === "function")
+        pluginBarApis[id].destroy()
+    }
+    pluginBarApis = ({})
+  }
+
+  function registerClickTarget(target) {
+    if (!target || clickTargets.indexOf(target) !== -1) return
+    var next = clickTargets.slice()
+    next.push(target)
+    clickTargets = next
+  }
+
+  function unregisterClickTarget(target) {
+    var next = clickTargets.filter(function(item) { return item !== target })
+    clickTargets = next
+  }
+
+  function registerModuleSlot(slot) {
+    if (!slot || moduleSlots.indexOf(slot) !== -1) return
+    var next = moduleSlots.slice()
+    next.push(slot)
+    moduleSlots = next
+  }
+
+  function unregisterModuleSlot(slot) {
+    var next = moduleSlots.filter(function(item) { return item !== slot })
+    moduleSlots = next
+  }
+
+  function debugBarGeometry() {
+    var out = []
+    for (var i = 0; i < moduleSlots.length; i++) {
+      var slot = moduleSlots[i]
+      if (!slot || !slot.activeItem) continue
+      var point = { x: slot.x, y: slot.y }
+      try {
+        point = slot.mapToItem(null, 0, 0)
+      } catch (e) {
+      }
+      out.push({
+        id: slot.moduleName,
+        section: slot.region,
+        x: Math.round(point.x),
+        y: Math.round(point.y),
+        width: Math.round(slot.width),
+        height: Math.round(slot.height),
+        visible: slot.visible === true && slot.width > 0 && slot.height > 0,
+        itemVisible: slot.activeItem.visible === true,
+        itemWidth: Math.round(slot.activeItem.implicitWidth || 0),
+        itemHeight: Math.round(slot.activeItem.implicitHeight || 0)
+      })
+    }
+    return out
+  }
+
+  function targetWindow(target) {
+    return target && target.QsWindow ? target.QsWindow.window : null
+  }
+
+  function targetBelongsToWindow(target, window) {
+    return !!target && !!window && targetWindow(target) === window
+  }
+
+  function slotWindow(slot) {
+    if (!slot) return null
+    return targetWindow(slot.activeItem) || targetWindow(slot)
+  }
+
+  function sameWindow(left, right) {
+    if (!left || !right) return false
+    if (left === right) return true
+    return !!left.screen && !!right.screen && !!left.screen.name && !!right.screen.name && left.screen.name === right.screen.name
+  }
+
+  function targetTooltipHovered(target) {
+    return !!target && target.visible !== false && target.opacity !== 0 && target.tooltipHovered === true
+  }
+
+  function clearTooltip() {
+    tooltipTimer.stop()
+    pendingTooltipTarget = null
+    pendingTooltipText = ""
+    tooltipTarget = null
+    tooltipText = ""
+    tooltipShown = false
+  }
+
+  function clearBarDrag() {
+    barDragSource = null
+    barDragWindow = null
+    barDragScreen = null
+    barDragImageUrl = ""
+    barDragTarget = null
+    barDragTargetGeometry = null
+    barDragAfter = false
+    barDragSceneX = 0
+    barDragSceneY = 0
+    barDragScreenX = 0
+    barDragScreenY = 0
+    barDragOffsetX = 0
+    barDragOffsetY = 0
+  }
+
+  function windowScreenPoint(scenePoint, window) {
+    var x = scenePoint ? scenePoint.x : 0
+    var y = scenePoint ? scenePoint.y : 0
+    if (!window || !window.screen) return { x: x, y: y }
+
+    if (root.position === "bottom")
+      y += Math.max(0, window.screen.height - window.height)
+    else if (root.position === "right")
+      x += Math.max(0, window.screen.width - window.width)
+
+    return { x: x, y: y }
+  }
+
+  function barDragScreenPoint(scenePoint) {
+    return windowScreenPoint(scenePoint, barDragWindow)
+  }
+
+  function dropMarkerRect(slot, after) {
+    if (!slot) return null
+
+    try {
+      var slotPoint = slot.mapToItem(null, 0, 0)
+      var screenPoint = barDragScreenPoint(slotPoint)
+      var thickness = Style.spacing.xs
+      if (vertical) {
+        return {
+          x: screenPoint.x,
+          y: screenPoint.y + (after ? slot.height : 0) - thickness / 2,
+          width: slot.width,
+          height: thickness
+        }
+      }
+
+      return {
+        x: screenPoint.x + (after ? slot.width : 0) - thickness / 2,
+        y: screenPoint.y,
+        width: thickness,
+        height: slot.height
+      }
+    } catch (e) {
+      return null
+    }
+  }
+
+  // Split the screen along its diagonals (in normalized space, so widescreens
+  // don't bias toward left/right): whichever triangle holds the cursor names
+  // the candidate edge.
+  function nearestScreenEdge(point, screen) {
+    var nx = screen.width > 0 ? Util.clamp(point.x / screen.width, 0, 1) : 0.5
+    var ny = screen.height > 0 ? Util.clamp(point.y / screen.height, 0, 1) : 0.5
+
+    var edge = "top"
+    var best = ny
+    if (1 - ny < best) { edge = "bottom"; best = 1 - ny }
+    if (nx < best) { edge = "left"; best = nx }
+    if (1 - nx < best) { edge = "right"; best = 1 - nx }
+    return edge
+  }
+
+  function beginBarMove(window) {
+    barMoveWindow = window
+    barMoveScreen = window ? window.screen : null
+    barMoveCandidate = position
+    barMoveActive = true
+  }
+
+  function updateBarMove(screenPoint) {
+    if (!barMoveActive || !barMoveScreen) return
+    barMoveCandidate = nearestScreenEdge(screenPoint, barMoveScreen)
+  }
+
+  function clearBarMove() {
+    barMoveActive = false
+    barMoveCandidate = ""
+    barMoveWindow = null
+    barMoveScreen = null
+  }
+
+  function finishBarMove() {
+    var edge = barMoveCandidate
+    if (!barMoveActive || !edge || edge === position) {
+      clearBarMove()
+      return
+    }
+
+    clearBarMove()
+    setBarPosition(edge)
+  }
+
+  function setBarPosition(value) {
+    var next = normalizePosition(value)
+    if (root.shell && typeof root.shell.mutateShellConfig === "function") {
+      root.shell.mutateShellConfig(function(config) {
+        if (!Util.isPlainObject(config.bar)) config.bar = {}
+        config.bar.position = next
+      })
+    } else {
+      root.position = next
+    }
+  }
+
+  function captureBarDragGhost(slot) {
+    var item = slot && slot.activeItem ? slot.activeItem : null
+    barDragImageUrl = ""
+    if (!item || typeof item.grabToImage !== "function") return
+
+    var grabWidth = Math.max(1, Math.ceil(item.width || item.implicitWidth || slot.width || 1))
+    var grabHeight = Math.max(1, Math.ceil(item.height || item.implicitHeight || slot.height || 1))
+    item.grabToImage(function(result) {
+      if (root.barDragSource !== slot || !result || !result.url) return
+      root.barDragImageUrl = result.url
+    }, Qt.size(grabWidth, grabHeight))
+  }
+
+  function requestPopout(owner) {
+    if (activePopout === owner) return
+    if (activePopout) {
+      if ("closeForPopoutSwitch" in activePopout) activePopout.closeForPopoutSwitch()
+      else if ("close" in activePopout) activePopout.close()
+    }
+    activePopout = owner
+  }
+
+  function releasePopout(owner) {
+    if (activePopout === owner) activePopout = null
+  }
+
+  readonly property bool vertical: position === "left" || position === "right"
+  readonly property int barSize: vertical ? Style.bar.sizeVertical : Style.bar.sizeHorizontal
+
+  function normalizePosition(value) {
+    return BarModel.normalizePosition(value)
+  }
+
+  // Apply tray-pinning on top of the shared layout normalization so the
+  // bar host and scriptable config helpers can't drift on entry shape.
+  function normalizeLayout(layout) {
+    var normalized = Util.normalizeLayout(Util.isPlainObject(layout) ? layout : fallbackBarConfig.layout)
+    return {
+      left:   pinTrayToInner(normalized.left,   "left"),
+      center: pinTrayToInner(normalized.center, "center"),
+      right:  pinTrayToInner(normalized.right,  "right")
+    }
+  }
+
+  // The tray drawer reveals inward (away from the bar edge). Place it at the
+  // section's inner edge: start of the right section, end of the left/center
+  // sections. The drawer's reserved space then sits next to the bar center,
+  // not stranded mid-section.
+  function pinTrayToInner(entries, section) {
+    return BarModel.pinTrayToInner(entries, section)
+  }
+
+  function applyBarConfig() {
+    var config = Util.isPlainObject(barConfig) ? barConfig : fallbackBarConfig
+
+    position = normalizePosition(config.position)
+    setRequestedTransparency(config.transparent === true)
+    centerAnchor = Util.canonicalWidgetId(config.centerAnchor || "")
+
+    // layoutEntries feeds plain JS arrays to the module Repeaters, and QML
+    // cannot diff those: reassigning layoutConfig rebuilds every widget on
+    // every monitor. When a shell.json write only changed inline widget
+    // settings, patch the live layout and running widgets in place instead.
+    var next = normalizeLayout(config.layout)
+    var delta = BarModel.inlineSettingsDelta(layoutConfig, next)
+    if (delta) {
+      applySettingsDelta(delta)
+      return
+    }
+    layoutConfig = next
+    barConfigSerial++
+  }
+
+  function applySettingsDelta(delta) {
+    for (var i = 0; i < delta.length; i++) {
+      var change = delta[i]
+      layoutConfig[change.region][change.index] = change.entry
+      var settings = entrySettings(change.entry)
+      for (var s = 0; s < moduleSlots.length; s++) {
+        var slot = moduleSlots[s]
+        if (!slot || slot.region !== change.region || slot.moduleName !== entryId(change.entry)) continue
+        var item = slot.activeItem
+        if (item && "settings" in item) item.settings = settings
+      }
+    }
+  }
+
+  onBarConfigChanged: applyBarConfig()
+
+  function layoutEntries(region) {
+    var serial = barConfigSerial
+    var entries = layoutConfig ? layoutConfig[region] : null
+    return Array.isArray(entries) ? entries : []
+  }
+
+  // Tab order for the panels in one bar region. Scoped to a single bar surface
+  // so tabbing walks the bar the open panel belongs to instead of hopping the
+  // panel to another monitor's copy of the same widget.
+  function panelNavigationSlots(region, window) {
+    var entries = layoutEntries(region)
+    var slots = []
+    for (var i = 0; i < entries.length; i++) {
+      var id = entryId(entries[i])
+      for (var j = 0; j < moduleSlots.length; j++) {
+        var slot = moduleSlots[j]
+        if (!slot || slot.region !== region || slot.moduleName !== id) continue
+        if (window && !sameWindow(slotWindow(slot), window)) continue
+        var item = slot.activeItem
+        if (!item || item.visible !== true || slot.visible !== true || slot.width <= 0 || slot.height <= 0) continue
+        if (typeof item.open !== "function" || typeof item.close !== "function" || item.opened === undefined) continue
+        slots.push(slot)
+        break
+      }
+    }
+    return slots
+  }
+
+  // The Nth panel in a bar region, counted the way the bar reads: layout order,
+  // and only the panels actually on screen. A widget with no panel (the tray)
+  // and one that is hiding itself are passed over, so the number lands on the
+  // Nth panel icon the user can see rather than the Nth layout entry.
+  // One-based, because it exists for hotkeys; anything else lands on no slot.
+  //
+  // Counting any bar surface is enough: every monitor lays its bar out from the
+  // one layout, and summoning the id routes through pickPanelSlot, which opens
+  // the focused monitor's copy whichever surface was counted.
+  function panelWidgetIdAt(region, index) {
+    var slots = panelNavigationSlots(String(region || ""), null)
+    var slot = slots[Math.round(Number(index)) - 1]
+    return slot ? String(slot.moduleName || "") : ""
+  }
+
+  function switchPanelFrom(owner, direction) {
+    if (!owner) return false
+
+    var currentSlot = null
+    for (var i = 0; i < moduleSlots.length; i++) {
+      var slot = moduleSlots[i]
+      if (slot && slot.activeItem === owner) {
+        currentSlot = slot
+        break
+      }
+    }
+    if (!currentSlot) return false
+
+    var slots = panelNavigationSlots(currentSlot.region, slotWindow(currentSlot))
+    if (slots.length < 2) return false
+
+    var currentIndex = -1
+    for (var j = 0; j < slots.length; j++) {
+      if (slots[j] === currentSlot) {
+        currentIndex = j
+        break
+      }
+    }
+    if (currentIndex < 0) return false
+
+    var step = direction < 0 ? -1 : 1
+    var nextSlot = slots[(currentIndex + step + slots.length) % slots.length]
+    if (!nextSlot || !nextSlot.activeItem || nextSlot.activeItem === owner) return false
+
+    nextSlot.activeItem.open()
+    return true
+  }
+
+  // Every live instance of a widget id. A bar surface is built per monitor, so
+  // a widget that appears once in the layout is still live once per screen.
+  function moduleWidgets(pluginId) {
+    var id = String(pluginId || "")
+    var items = []
+    if (!id) return items
+    for (var i = 0; i < moduleSlots.length; i++) {
+      var slot = moduleSlots[i]
+      if (!slot || !slot.activeItem || slot.moduleName !== id) continue
+      items.push(slot.activeItem)
+    }
+    return items
+  }
+
+  function slotScreenName(slot) {
+    var window = slotWindow(slot)
+    return window && window.screen ? String(window.screen.name || "") : ""
+  }
+
+  // The output Hyprland has focused, which is where a keyboard-summoned panel
+  // belongs. Empty until Hyprland reports one, which leaves panel routing on
+  // its per-monitor fallback rather than guessing at an output.
+  function focusedScreenName() {
+    var monitor = Hyprland.focusedMonitor
+    return monitor ? String(monitor.name || "") : ""
+  }
+
+  // Resolve the live bar-widget instance for a plugin id (e.g. "omarchy.bluetooth").
+  // Only widgets that expose popup open/close methods count; plain indicators
+  // (clock, workspaces, tray) return null. Used by shell.summon/toggle so
+  // panel hotkeys route through the bar instead of a per-target IPC handler
+  // that only reaches whichever per-monitor instance claimed the target.
+  function findPanelWidget(pluginId) {
+    var id = String(pluginId || "")
+    if (!id) return null
+    var candidates = []
+    for (var i = 0; i < moduleSlots.length; i++) {
+      var slot = moduleSlots[i]
+      if (!slot || !slot.activeItem) continue
+      if (slot.moduleName !== id) continue
+      var item = slot.activeItem
+      if (typeof item.open !== "function" || typeof item.close !== "function" || item.opened === undefined) continue
+      candidates.push({ slot: slot, screenName: slotScreenName(slot), opened: item.opened === true })
+    }
+    // One copy per monitor, plus a zero-size placeholder for anchored center
+    // modules. See BarModel.pickPanelSlot for which one a hotkey acts on.
+    var chosen = BarModel.pickPanelSlot(candidates, focusedScreenName())
+    return chosen ? chosen.activeItem : null
+  }
+
+  function summonBarWidget(pluginId) {
+    var item = findPanelWidget(pluginId)
+    if (!item || typeof item.open !== "function") return false
+    item.open()
+    return true
+  }
+
+  function hideBarWidget(pluginId) {
+    var item = findPanelWidget(pluginId)
+    if (!item || typeof item.close !== "function") return false
+    item.close()
+    return true
+  }
+
+  function isBarWidgetOpen(pluginId) {
+    var item = findPanelWidget(pluginId)
+    return !!item && item.opened === true
+  }
+
+  // Runs of consecutive entries with the same "group" key: [{ group, entries }].
+  function islandsOf(entries) {
+    var out = []
+    for (var i = 0; i < (entries || []).length; i++) {
+      var e = entries[i]
+      var g = e && typeof e === "object" && e.group ? String(e.group) : ""
+      var last = out.length ? out[out.length - 1] : null
+      if (last && g !== "" && last.group === g) last.entries.push(e)
+      else out.push({ group: g, entries: [e] })
+    }
+    return out
+  }
+
+  function entrySettings(entry) {
+    return BarModel.entrySettings(entry)
+  }
+
+  function entryId(entry) {
+    return BarModel.entryId(entry)
+  }
+
+  function moduleString(entry, key, fallback) {
+    return BarModel.moduleString(entry, key, fallback)
+  }
+
+  function entryIndex(entries, name) {
+    return BarModel.entryIndex(entries, name)
+  }
+
+  function entriesBefore(entries, name) {
+    return BarModel.entriesBefore(entries, name)
+  }
+
+  function entriesAfter(entries, name) {
+    return BarModel.entriesAfter(entries, name)
+  }
+
+  function canonicalWidgetId(name) {
+    return Util.canonicalWidgetId(name)
+  }
+
+  function expandPath(path) {
+    return BarModel.expandPath(path, home)
+  }
+
+  function customModuleSafeName(name) {
+    return BarModel.customModuleSafeName(name)
+  }
+
+  function customModuleType(entry) {
+    return BarModel.customModuleType(entry)
+  }
+
+  function customModuleSource(entry) {
+    var source = BarModel.customModulePath(entry, home, omarchyConfigDir)
+    return source ? Util.fileUrl(source) : ""
+  }
+
+  readonly property string blurToggle: stateHome + "/omarchy/toggles/hypr/hugorolimf-bar-blur.lua"
+  readonly property string blurLua: [
+    "-- io.github.hugorolimf.bar: blur behind the translucent bar (layer namespace omarchy-bar).",
+    "-- Written by the bar; delete this file and run hyprctl reload to turn it off.",
+    "hl.layer_rule({ name = \"hugorolimf-bar-blur\", match = { namespace = \"omarchy-bar\" }, blur = true, ignore_alpha = 0, no_anim = true, animation = \"none\" })"
+  ].join("\n")
+  Component.onCompleted: {
+    applyBarConfig()
+    Quickshell.execDetached(["sh", "-c",
+      'printf "%s\\n" "$2" | cmp -s - "$1" || { mkdir -p "$(dirname "$1")" && printf "%s\\n" "$2" > "$1" && hyprctl reload; }',
+      "sh", blurToggle, blurLua])
+  }
+
+  // Revealing the indicators widens their section, which can slide a neighbour
+  // under a stationary pointer. Collapsing on that un-hover would move it back
+  // out and re-open the peek, so hold until the pointer leaves the bar.
+  function setCenterSectionHovered(hovered) {
+    centerSectionHovered = hovered
+    if (hovered) {
+      centerSectionRevealTimer.stop()
+      centerSectionRevealHeld = true
+    } else {
+      centerSectionRevealTimer.restart()
+    }
+  }
+
+  function setBarHovered(hovered) {
+    barHoverCount = Math.max(0, barHoverCount + (hovered ? 1 : -1))
+    if (barHoverCount === 0) centerSectionRevealTimer.restart()
+  }
+
+  function setCenterHoverRevealSuppressed(value) {
+    centerHoverRevealSuppressed = !!value
+  }
+
+  Timer {
+    id: centerSectionRevealTimer
+    interval: 120
+    // Collapse only. Opening the peek is the center section's own gesture, done
+    // in setCenterSectionHovered, so a timer left pending by a pointer that dipped
+    // off the bar and came back cannot reveal indicators it never pointed at.
+    onTriggered: if (!root.centerSectionHovered && !root.barHovered) root.centerSectionRevealHeld = false
+  }
+
+  function run(command) {
+    if (!command) return
+
+    Util.execDetached(command)
+  }
+
+  function toggleTransparency() {
+    var nextTransparent = !(root.requestedTransparent === true)
+    if (root.shell && typeof root.shell.mutateShellConfig === "function") {
+      root.shell.mutateShellConfig(function(config) {
+        if (!Util.isPlainObject(config.bar)) config.bar = {}
+        config.bar.transparent = nextTransparent
+      })
+    } else {
+      root.setRequestedTransparency(nextTransparent)
+    }
+  }
+
+  function rawLayoutSection(config, region) {
+    if (!Util.isPlainObject(config.bar)) config.bar = {}
+    if (!Util.isPlainObject(config.bar.layout)) config.bar.layout = {}
+    if (!Array.isArray(config.bar.layout[region])) config.bar.layout[region] = []
+
+    return config.bar.layout[region]
+  }
+
+  function rawEntryIndex(entries, name) {
+    for (var i = 0; i < entries.length; i++) {
+      if (root.entryId(entries[i]) === name) return i
+    }
+
+    return -1
+  }
+
+  function moveModuleInConfig(config, fromRegion, fromName, toRegion, beforeName) {
+    var fromEntries = rawLayoutSection(config, fromRegion)
+    var toEntries = rawLayoutSection(config, toRegion)
+    var fromIndex = rawEntryIndex(fromEntries, fromName)
+    if (fromIndex < 0) return false
+
+    var toIndex = beforeName ? rawEntryIndex(toEntries, beforeName) : toEntries.length
+    if (toIndex < 0) toIndex = toEntries.length
+
+    if (fromRegion === toRegion && fromIndex === toIndex) return false
+
+    var movedEntry = fromEntries[fromIndex]
+    fromEntries.splice(fromIndex, 1)
+
+    if (fromRegion === toRegion && fromIndex < toIndex) toIndex -= 1
+    if (toIndex < 0) toIndex = 0
+    if (toIndex > toEntries.length) toIndex = toEntries.length
+    if (fromRegion === toRegion && fromIndex === toIndex) {
+      fromEntries.splice(fromIndex, 0, movedEntry)
+      return false
+    }
+
+    toEntries.splice(toIndex, 0, movedEntry)
+    return true
+  }
+
+  function dropBarModule(source, toRegion, beforeName) {
+    if (!source || !source.region || !source.moduleName || !toRegion) return false
+    if (source.region === toRegion && source.moduleName === beforeName) return false
+    if (!root.shell || typeof root.shell.mutateShellConfig !== "function") return false
+
+    var changed = false
+    root.shell.mutateShellConfig(function(config) {
+      changed = moveModuleInConfig(config, source.region, source.moduleName, toRegion, beforeName)
+    })
+    return changed
+  }
+
+  function moduleDropAtScene(scenePoint, sourceSlot) {
+    var sourceWindow = root.slotWindow(sourceSlot) || root.barDragWindow
+    if (sourceWindow && sourceWindow.contentItem) {
+      var barPoint = sourceWindow.contentItem.mapFromItem(null, scenePoint.x, scenePoint.y)
+      if (barPoint.x < 0 || barPoint.x > sourceWindow.contentItem.width ||
+          barPoint.y < 0 || barPoint.y > sourceWindow.contentItem.height)
+        return null
+    }
+
+    var candidates = []
+    for (var i = 0; i < moduleSlots.length; i++) {
+      var slot = moduleSlots[i]
+      if (!slot || slot === sourceSlot || !slot.visible || slot.width <= 0 || slot.height <= 0) continue
+      if (sourceWindow && !root.sameWindow(root.slotWindow(slot), sourceWindow)) continue
+
+      var slotPoint = { x: slot.x, y: slot.y }
+      try {
+        slotPoint = slot.mapToItem(null, 0, 0)
+      } catch (e) {
+      }
+
+      candidates.push({
+        slot: slot,
+        x: slotPoint.x,
+        y: slotPoint.y,
+        width: slot.width,
+        height: slot.height
+      })
+    }
+
+    return BarModel.nearestDropTarget(candidates, scenePoint, root.vertical)
+  }
+
+  function visibleModuleSlot(region, name, sourceSlot) {
+    var sourceWindow = root.slotWindow(sourceSlot) || root.barDragWindow
+    for (var i = 0; i < moduleSlots.length; i++) {
+      var slot = moduleSlots[i]
+      if (!slot || slot === sourceSlot || slot.region !== region || slot.moduleName !== name ||
+          !slot.visible || slot.width <= 0 || slot.height <= 0) continue
+      if (sourceWindow && !root.sameWindow(root.slotWindow(slot), sourceWindow)) continue
+      return slot
+    }
+
+    return null
+  }
+
+  function nextVisibleModuleName(region, afterName, sourceSlot) {
+    var entries = layoutEntries(region)
+    var found = false
+    for (var i = 0; i < entries.length; i++) {
+      var name = entryId(entries[i])
+      if (!found) {
+        found = name === afterName
+        continue
+      }
+
+      if (visibleModuleSlot(region, name, sourceSlot)) return name
+    }
+
+    return ""
+  }
+
+  function dropBarModuleAtTarget(sourceSlot, targetSlot, afterTarget) {
+    if (!sourceSlot || !targetSlot) return false
+
+    var beforeName = afterTarget ? nextVisibleModuleName(targetSlot.region, targetSlot.moduleName, sourceSlot) : targetSlot.moduleName
+    return dropBarModule(sourceSlot, targetSlot.region, beforeName)
+  }
+
+  function moduleTargetClickable(target) {
+    return target
+      && target.visible !== false
+      && target.opacity !== 0
+      && target.interactive !== false
+      && target.pressable !== false
+      && target.concealed !== true
+      && typeof target.triggerPress === "function"
+  }
+
+  function moduleClickTargetAt(slot, localX, localY) {
+    for (var i = clickTargets.length - 1; i >= 0; i--) {
+      var target = clickTargets[i]
+      if (!moduleTargetClickable(target)) continue
+
+      var targetPoint = { x: localX, y: localY }
+      try {
+        targetPoint = slot.mapToItem(target, localX, localY)
+      } catch (e) {
+        continue
+      }
+
+      if (targetPoint.x >= 0 && targetPoint.x <= target.width &&
+          targetPoint.y >= 0 && targetPoint.y <= target.height) {
+        return target
+      }
+    }
+
+    if (moduleTargetClickable(slot.activeItem)) return slot.activeItem
+    return null
+  }
+
+  function pressModuleClickTarget(slot, button, localX, localY) {
+    var target = moduleClickTargetAt(slot, localX, localY)
+    if (!target) return false
+
+    target.triggerPress(button)
+    return true
+  }
+
+  function colorHex(colorValue) {
+    var c = colorValue
+    if (typeof c === "string") c = Qt.color(c)
+    function hexChannel(value) {
+      var s = Math.round(Util.clamp(value, 0, 1) * 255).toString(16)
+      return s.length < 2 ? "0" + s : s
+    }
+    return "#" + hexChannel(c.r) + hexChannel(c.g) + hexChannel(c.b)
+  }
+
+  function setRequestedTransparency(value) {
+    var nextTransparent = value === true
+    requestedTransparent = nextTransparent
+    if (!nextTransparent) {
+      foregroundAnimationEnabled = false
+      useTransparentForeground = false
+      transparent = false
+      transparentForeground = themeForeground
+      restoreForegroundAnimation()
+      return
+    }
+    scheduleTransparentForegroundRefresh()
+  }
+
+  function restoreForegroundAnimation() {
+    Qt.callLater(function() {
+      Qt.callLater(function() { root.foregroundAnimationEnabled = true })
+    })
+  }
+
+  function scheduleTransparentForegroundRefresh() {
+    if (!requestedTransparent) {
+      transparentForeground = themeForeground
+      return
+    }
+    transparentForegroundTimer.restart()
+  }
+
+  function refreshTransparentForeground() {
+    if (!requestedTransparent || transparentForegroundProc.running) return
+
+    transparentForegroundProc.command = [
+      "omarchy-bar-text-color",
+      root.position,
+      String(root.barSize),
+      colorHex(root.themeForeground),
+      colorHex(root.themeContrastForeground)
+    ]
+    transparentForegroundProc.running = true
+  }
+
+  onRequestedTransparentChanged: scheduleTransparentForegroundRefresh()
+  onPositionChanged: scheduleTransparentForegroundRefresh()
+  onThemeForegroundChanged: scheduleTransparentForegroundRefresh()
+  onThemeContrastForegroundChanged: scheduleTransparentForegroundRefresh()
+
+  Timer {
+    id: transparentForegroundTimer
+    interval: 120
+    repeat: false
+    onTriggered: root.refreshTransparentForeground()
+  }
+
+  Process {
+    id: transparentForegroundProc
+    stdout: SplitParser {
+      onRead: function(line) {
+        var value = String(line || "").trim()
+        if (!/^#[0-9A-Fa-f]{6}$/.test(value)) return
+
+        root.foregroundAnimationEnabled = false
+        root.transparentForeground = value
+        if (root.requestedTransparent) {
+          root.useTransparentForeground = true
+          root.transparent = true
+        }
+        root.restoreForegroundAnimation()
+      }
+    }
+  }
+
+  FileView {
+    path: root.stateHome + "/omarchy/current"
+    watchChanges: true
+    printErrors: false
+    onFileChanged: root.scheduleTransparentForegroundRefresh()
+  }
+
+  function runProcess(process) {
+    if (!process.running)
+      process.running = true
+  }
+
+  // Glass Bar: what each icon is and what clicking it does, in Portuguese.
+  // Widgets that already describe themselves on hover (media, microphone,
+  // keyboard layout, tray items, indicators) keep theirs, translated below.
+  readonly property var ptTips: ({
+    "omarchy.menu": "Menu do sistema — clique para abrir · botão direito abre o terminal",
+    "yakumy.station": "Station — áreas de trabalho e telas sincronizadas",
+    "omarchy.weather": "Clima — clique para ver a previsão",
+    "techspawn.projects": "Projetos — seus repositórios git: branch, alterações, pull e push",
+    "evindor.keystroke": "Keystroke — paleta de comandos para abrir apps e ações",
+    "omarchy.agents": "Agentes de IA — limites e uso do Claude, Codex e outros",
+    "io.github.hugorolimf.dock": "Dock — ajustes da dock",
+    "io.github.fasi96.liquid-glass": "Liquid Glass — ajustar o vidro dos terminais",
+    "omaplug": "Plugins — ativar, desativar e atualizar plugins do sistema",
+    "omarchy.system-update": "Atualizações disponíveis — clique para atualizar o sistema",
+    "omarchy.bluetooth": "Bluetooth — clique para ver e conectar dispositivos · botão direito liga/desliga",
+    "omarchy.network": "Wi‑Fi e rede — clique para ver as redes",
+    "omarchy.audio": "Som — clique para volume e saídas · role para ajustar · botão direito silencia",
+    "omarchy.monitor": "Tela — brilho e monitores",
+    "omarchy.power": "Bateria e energia — clique para detalhes e modos de energia",
+    "hugo.power": "Bateria e energia — clique para detalhes e modos de energia",
+    "omarchy.tailscale": "Tailscale — rede privada",
+    "io.github.hugorolimf.clock": "Calendário — clique para abrir"
+  })
+  readonly property var ptTexts: ({
+    "Microphone muted": "Microfone silenciado — clique para ativar",
+    "Microphone in use": "Microfone em uso — clique para silenciar",
+    "Microphone live": "Microfone ligado — clique para silenciar",
+    "Pending Omarchy Updates": "Atualizações do Omarchy pendentes"
+  })
+  // `omarchy-shell io.github.hugorolimf.bar peek`: every icon shows its value for a few
+  // seconds, as if all were hovered at once.
+  property bool peekValues: false
+  Timer { id: peekTimer; interval: 4000; onTriggered: root.peekValues = false }
+  IpcHandler {
+    target: "io.github.hugorolimf.bar"
+    function peek(): void { root.peekValues = true; peekTimer.restart() }
+  }
+
+  // The network widget only learns the Wi-Fi name once its panel opens, so
+  // ask nmcli when the network icon is hovered (or peeked), not on a timer.
+  property string wifiName: ""
+  function refreshWifiName() { if (!wifiProc.running) wifiProc.running = true }
+  onPeekValuesChanged: if (peekValues) refreshWifiName()
+  Process {
+    id: wifiProc
+    command: ["sh", "-c", "nmcli -t -f active,ssid dev wifi 2>/dev/null | sed -n 's/^\\(sim\\|yes\\)://p' | head -1"]
+    stdout: StdioCollector { onStreamFinished: root.wifiName = text.trim() }
+  }
+
+  // Icon set, "anatomy" style: thin monochrome strokes on a 24-unit
+  // grid, colour only where it says something (green ok/charging, amber
+  // attention, red alert, blue in use, dim = off). Drawn by the bar over
+  // the widget, which stays underneath invisible and still takes the clicks.
+  // iconFor returns { key, tone, badge, parts: [{ d, a (alpha), f (fill) }] }
+  // or null to keep the widget's own look.
+  readonly property var easeCurve: [0.32, 0.72, 0, 1, 1, 1]
+  readonly property string monoFamily: "JetBrainsMono Nerd Font"
+  function circ(cx, cy, r) {
+    return "M" + (cx - r) + " " + cy + "a" + r + " " + r + " 0 1 0 " + (2 * r) + " 0a" + r + " " + r + " 0 1 0 " + (-2 * r) + " 0"
+  }
+  function rrect(x, y, w, h, r) {
+    return "M" + (x + r) + " " + y + "h" + (w - 2 * r) + "a" + r + " " + r + " 0 0 1 " + r + " " + r + "v" + (h - 2 * r)
+      + "a" + r + " " + r + " 0 0 1 " + (-r) + " " + r + "h" + (-(w - 2 * r)) + "a" + r + " " + r + " 0 0 1 " + (-r) + " " + (-r)
+      + "v" + (-(h - 2 * r)) + "a" + r + " " + r + " 0 0 1 " + r + " " + (-r) + "z"
+  }
+  readonly property var shapes: ({
+    cmd: ["M9 9V6.5A2.5 2.5 0 1 0 6.5 9H17.5A2.5 2.5 0 1 0 15 6.5V17.5A2.5 2.5 0 1 0 17.5 15H6.5A2.5 2.5 0 1 0 9 17.5Z"],
+    projects: [circ(6, 6, 2) + circ(6, 18, 2) + circ(18, 8, 2), "M6 8v8M18 10c0 4-6 3-11.2 6.6"],
+    agents: ["M12 3l1.6 4.4L18 9l-4.4 1.6L12 15l-1.6-4.4L6 9l4.4-1.6zM18.5 15l.7 1.8 1.8.7-1.8.7-.7 1.8-.7-1.8-1.8-.7 1.8-.7z"],
+    dock: [rrect(3, 4, 18, 16, 3), "M7 16h10"],
+    glass: ["M12 3.5c3 3.6 5.5 6.6 5.5 10a5.5 5.5 0 0 1-11 0c0-3.4 2.5-6.4 5.5-10z", "M9.5 14.5a2.5 2.5 0 0 0 2.5 2.5"],
+    plugins: ["M10 4h4v3a2 2 0 1 0 0 4h3v4h-3a2 2 0 1 0 0 4v1h-4v-3a2 2 0 1 0-4 0v3H4v-4h1a2 2 0 1 0 0-4H4V7h6z"],
+    update: ["M12 4v11M7.5 10.5L12 15l4.5-4.5M5 19.5h14"],
+    cloud: ["M7.5 18h9a3.5 3.5 0 0 0 .4-7A5 5 0 0 0 7.3 9.6 4.2 4.2 0 0 0 7.5 18z"],
+    sun: [circ(12, 12, 4), "M12 2.5v2M12 19.5v2M2.5 12h2M19.5 12h2M5.3 5.3l1.4 1.4M17.3 17.3l1.4 1.4M5.3 18.7l1.4-1.4M17.3 6.7l1.4-1.4"],
+    partly: ["M8.5 3.5v1.6M3.7 5.6l1.1 1.1M2.5 10.5h1.6M13.3 5.6l-1.1 1.1M5.6 12.6A3.6 3.6 0 0 1 11.9 8.9",
+             "M9.5 20h7.5a3.2 3.2 0 0 0 .3-6.4A4.6 4.6 0 0 0 8.6 12.3 3.9 3.9 0 0 0 9.5 20z"],
+    moon: ["M19 14.5A7.5 7.5 0 0 1 9.5 5a7.5 7.5 0 1 0 9.5 9.5z"],
+    rain: ["M7.5 14.5h9a3.5 3.5 0 0 0 .4-7A5 5 0 0 0 7.3 6.1 4.2 4.2 0 0 0 7.5 14.5z", "M9 17l-1 2.5M13 17l-1 2.5M17 17l-1 2.5"],
+    snow: ["M7.5 14.5h9a3.5 3.5 0 0 0 .4-7A5 5 0 0 0 7.3 6.1 4.2 4.2 0 0 0 7.5 14.5z", circ(9, 18, .7) + circ(12, 20.5, .7) + circ(15, 18, .7)],
+    storm: ["M7.5 14.5h9a3.5 3.5 0 0 0 .4-7A5 5 0 0 0 7.3 6.1 4.2 4.2 0 0 0 7.5 14.5z", "M12.5 15.5l-2 3h3l-2 3"],
+    fog: ["M4 8h16M6 12h12M4 16h16"],
+    mic: [rrect(9, 3.5, 6, 11, 3), "M5.5 11.5a6.5 6.5 0 0 0 13 0M12 18v2.5"],
+    slash: ["M4 4l16 16"],
+    bluetooth: ["M7 7l10 10-5 4V3l5 4L7 17"],
+    btdots: [circ(3.8, 12, .7) + circ(20.2, 12, .7)],
+    wifi3: ["M2.8 9.2a13 13 0 0 1 18.4 0"], wifi2: ["M5.8 12.4a8.6 8.6 0 0 1 12.4 0"], wifi1: ["M8.9 15.5a4.3 4.3 0 0 1 6.2 0"],
+    wifidot: [circ(12, 18.6, .9)],
+    lan: [rrect(9, 3, 6, 5, 1) + rrect(3, 15, 5, 5, 1) + rrect(16, 15, 5, 5, 1), "M12 8v3.5M5.5 15v-3.5h13V15"],
+    speaker: ["M4 9.5h3.5L12 5.5v13l-4.5-4H4z"], wave1: ["M15.5 9.2a4 4 0 0 1 0 5.6"], wave2: ["M18 7a7 7 0 0 1 0 10"],
+    mute: ["M16 9.5l5 5M21 9.5l-5 5"],
+    sunCore: [circ(12, 12, 3.6)],
+    battery: [rrect(3, 7.5, 16, 9, 2.5), "M21 10.5v3"],
+    bolt: ["M11.8 9.2l-2 3h3l-2 3"]
+  })
+  function partsOf(names, alpha, fill) {
+    var out = []
+    for (var i = 0; i < names.length; i++) {
+      var list = shapes[names[i]] || []
+      for (var j = 0; j < list.length; j++) out.push({ d: list[j], a: alpha === undefined ? 1 : alpha, f: !!fill })
+    }
+    return out
+  }
+  readonly property var fixedShapes: ({
+    "evindor.keystroke": "cmd", "omarchy.agents": "agents", "io.github.hugorolimf.dock": "dock",
+    "io.github.fasi96.liquid-glass": "glass", "omaplug": "plugins"
+  })
+  // Nerd Font weather glyph of the weather widget -> our shape.
+  readonly property var weatherShapes: ({
+    "e30d": "sun", "e32b": "moon", "e302": "partly", "e32e": "partly", "e33d": "cloud", "e313": "fog", "e346": "fog",
+    "e308": "rain", "e333": "rain", "e30a": "snow", "e327": "snow", "e3ad": "snow", "e31d": "storm", "e318": "rain", "e31a": "snow"
+  })
+
+  // First glyph a widget paints (the weather widget keeps its icon on an
+  // inner button's text).
+  function paintedGlyph(item, depth) {
+    if (!item || depth > 4) return ""
+    if (typeof item.text === "string" && item.text.length > 0 && item.text.charCodeAt(0) >= 0xe000) return item.text
+    var kids = item.children || []
+    for (var i = 0; i < kids.length; i++) {
+      var g = paintedGlyph(kids[i], depth + 1)
+      if (g) return g
+    }
+    return ""
+  }
+
+  function iconFor(id, item) {
+    if (!item) return null
+    try {
+      if (id === "omarchy.agents") {
+        var hl = item.headline
+        var pc = hl && hl.percent >= 0 ? hl.percent : -1
+        return { key: "agents", always: pc >= 0, tone: pc >= 0.9 ? "red" : pc >= 0.7 ? "amber" : "", parts: partsOf(["agents"]) }
+      }
+      if (fixedShapes[id]) return { key: fixedShapes[id], parts: partsOf([fixedShapes[id]]) }
+      if (id === "omarchy.system-update") return { key: "update", tone: "amber", parts: partsOf(["update"]) }
+      if (id === "techspawn.projects") return { key: "projects", badge: item.attention > 0 ? item.attention : 0, parts: partsOf(["projects"]) }
+      if (id === "omarchy.weather") {
+        var g = paintedGlyph(item, 0)
+        var w = g ? weatherShapes[g.charCodeAt(0).toString(16)] : ""
+        return w ? { key: "w-" + w, parts: partsOf([w]) } : null
+      }
+      if (id === "omarchy.audio" && "outputVolume" in item) {
+        var v = item.outputVolume
+        if (item.outputMuted) return { key: "mute", tone: "dim", parts: partsOf(["speaker", "mute"]) }
+        var p = partsOf(["speaker"])
+        if (v > 0.001) p = p.concat(partsOf(["wave1"]))
+        p = p.concat(partsOf(["wave2"], v >= 0.5 ? 1 : 0.3))
+        return { key: "vol" + (v <= 0.001 ? 0 : v < 0.5 ? 1 : 2), parts: p }
+      }
+      if (id === "omarchy.network") {
+        if (item.kind === "ethernet") return { key: "lan", parts: partsOf(["lan"]) }
+        if (item.kind !== "wifi") return { key: "nowifi", tone: "dim", parts: partsOf(["wifi3", "wifi2", "wifi1"], 0.35).concat(partsOf(["slash"])) }
+        var sig = item.signalStrength > 0 ? item.signalStrength : 100
+        return { key: "wifi" + (sig < 34 ? 1 : sig < 67 ? 2 : 3),
+                 parts: partsOf(["wifi3"], sig >= 67 ? 1 : 0.3).concat(partsOf(["wifi2"], sig >= 34 ? 1 : 0.3), partsOf(["wifi1"]), partsOf(["wifidot"], 1, true)) }
+      }
+      if (id === "omarchy.bluetooth" && "connectedDevices" in item) {
+        if (item.adapter && item.adapter.enabled === false) return { key: "bt-off", tone: "dim", parts: partsOf(["bluetooth"]) }
+        if ((item.connectedDevices || []).length > 0) return { key: "bt-on", tone: "blue", parts: partsOf(["bluetooth"]).concat(partsOf(["btdots"], 1, true)) }
+        return { key: "bt", parts: partsOf(["bluetooth"]) }
+      }
+      if (id === "omarchy.microphone" && "muted" in item) {
+        if (item.muted) return { key: "mic-off", tone: "dim", parts: partsOf(["mic", "slash"]) }
+        return { key: item.inUse ? "mic-live" : "mic", tone: item.inUse ? "red" : "", parts: partsOf(["mic"]) }
+      }
+      if (id === "omarchy.monitor") {
+        var b = item.brightnessAvailable ? item.brightnessPercent : 50
+        var len = 1 + Math.round(b / 100 * 1.5)
+        var rays = "M12 " + (5 - len) + "v" + len + "M12 19v" + len + "M" + (5 - len) + " 12h" + len + "M19 12h" + len
+          + "M" + (7.1 - len * .7) + " " + (7.1 - len * .7) + "l" + (len * .7) + " " + (len * .7)
+          + "M16.9 16.9l" + (len * .7) + " " + (len * .7) + "M" + (7.1 - len * .7) + " " + (16.9 + len * .7) + "l" + (len * .7) + " " + (-len * .7)
+          + "M16.9 7.1l" + (len * .7) + " " + (-len * .7)
+        return { key: "sun" + len, parts: partsOf(["sunCore"]).concat([{ d: rays, a: 1, f: false }]) }
+      }
+      if ((id === "omarchy.power" || id === "hugo.power")) {
+        var d = UPower.displayDevice
+        if (!d || !d.isLaptopBattery) return null
+        var pct = d.percentage <= 1.0001 ? d.percentage * 100 : d.percentage
+        var charging = d.state === UPowerDeviceState.Charging || d.state === UPowerDeviceState.FullyCharged
+        var fillW = Math.max(1, 12 * Math.min(1, pct / 100))
+        var parts = partsOf(["battery"]).concat([{ d: rrect(5, 9.5, fillW, 5, 1), a: charging ? 0.35 : 0.85, f: true }])
+        if (charging) parts = parts.concat(partsOf(["bolt"]))
+        var tone = charging ? "green" : pct < 10 ? "red" : pct < 20 ? "amber" : ""
+        return { key: "bat" + Math.round(pct / 10) + (charging ? "c" : ""), tone: tone, parts: parts }
+      }
+    } catch (e) {}
+    return null
+  }
+  function toneColor(tone) {
+    if (tone === "green") return "#6be0a0"
+    if (tone === "amber") return "#f5c26b"
+    if (tone === "red") return "#ff6b6b"
+    if (tone === "blue") return "#6b9bff"
+    if (tone === "dim") return Qt.rgba(barForeground.r, barForeground.g, barForeground.b, 0.45)
+    return barForeground
+  }
+
+  // Value shown beside an icon while it is hovered ("" = nothing to add).
+  // Read from the widget itself where it already knows (volume, network,
+  // Bluetooth, brightness) and from UPower for the battery.
+  function liveLabel(id, item, hovered) {
+    if (!item) return ""
+    try {
+      // AI usage (omarchy.agents): always the share of the tightest limit;
+      // hovering adds the provider and when that limit resets.
+      if (id === "omarchy.agents") {
+        var hl = item.headline
+        if (!hl || !(hl.percent >= 0)) return ""
+        var pct = Math.round(hl.percent * 100) + "%"
+        if (!hovered) return pct
+        var name = item.provider && item.provider.providerName ? item.provider.providerName + " " : ""
+        var ms = hl.resetAt ? new Date(hl.resetAt).getTime() - Date.now() : -1
+        return name + pct + (ms > 0 ? root.tr(" · zera em ") + durationText(ms / 1000) : "")
+      }
+      if (id === "omarchy.audio" && "outputVolume" in item)
+        return item.outputMuted ? root.tr("Mudo") : Math.round(item.outputVolume * 100) + "%"
+      if (id === "omarchy.network") {
+        var net = item.connectedWifiNetwork
+        if (net && net.ssid) return net.ssid
+        if (item.info && item.info.ssid) return item.info.ssid
+        if (wifiName !== "") return wifiName
+        if (item.kind === "ethernet") return root.tr("Cabo")
+        return item.kind === "wifi" ? "Wi‑Fi" : root.tr("Sem conexão")
+      }
+      if (id === "omarchy.bluetooth" && "connectedDevices" in item) {
+        var devs = item.connectedDevices || []
+        if (devs.length > 0) return String(devs[0].name || devs[0].deviceName || root.tr("Conectado")) + (devs.length > 1 ? " +" + (devs.length - 1) : "")
+        return item.adapter && item.adapter.enabled === false ? root.tr("Desligado") : root.tr("Nenhum aparelho")
+      }
+      if (id === "omarchy.monitor" && item.brightnessAvailable) return item.brightnessPercent + "%"
+      if (id === "omarchy.microphone" && "muted" in item) return item.muted ? root.tr("Mudo") : root.tr("Ligado")
+      if ((id === "omarchy.power" || id === "hugo.power")) return batteryLabel()
+    } catch (e) {}
+    return ""
+  }
+
+  function batteryLabel() {
+    var d = UPower.displayDevice
+    if (!d || !d.isLaptopBattery) return ""
+    var pct = d.percentage <= 1.0001 ? d.percentage * 100 : d.percentage
+    var text = Math.round(pct) + "%"
+    if (d.state === UPowerDeviceState.Charging) {
+      text += root.tr(" · carregando")
+      if (d.timeToFull > 0) text += root.tr(", cheia em ") + durationText(d.timeToFull)
+    } else if (d.state === UPowerDeviceState.FullyCharged) {
+      text += root.tr(" · carregada")
+    } else if (d.timeToEmpty > 0) {
+      text += " · " + durationText(d.timeToEmpty) + root.tr(" restantes")
+    }
+    return text
+  }
+
+  function durationText(seconds) {
+    var h = Math.floor(seconds / 3600), m = Math.round((seconds % 3600) / 60)
+    if (h >= 24) return Math.floor(h / 24) + "d" + (h % 24 > 0 ? " " + (h % 24) + "h" : "")
+    return h > 0 ? h + "h" + (m < 10 ? "0" : "") + m : m + " min"
+  }
+
+  // Portuguese is the source language for the bar's own strings; anything
+  // else gets English. Widget texts are only translated for Portuguese.
+  readonly property bool portuguese: Qt.locale().name.indexOf("pt") === 0
+  readonly property var enTips: ({"omarchy.menu": "System menu — click to open · right-click opens a terminal", "yakumy.station": "Station — synced workspaces and displays", "omarchy.weather": "Weather — click for the forecast", "techspawn.projects": "Projects — your git repos: branch, changes, pull and push", "evindor.keystroke": "Keystroke — command palette for apps and actions", "omarchy.agents": "AI agents — limits and usage for Claude, Codex and others", "io.github.hugorolimf.dock": "Dock — dock settings", "io.github.fasi96.liquid-glass": "Liquid Glass — tune the terminals' glass", "omaplug": "Plugins — enable, disable and update plugins", "omarchy.system-update": "Updates available — click to update the system", "omarchy.bluetooth": "Bluetooth — click to see and connect devices · right-click toggles it", "omarchy.network": "Wi‑Fi and network — click to see networks", "omarchy.audio": "Sound — click for volume and outputs · scroll to adjust · right-click mutes", "omarchy.monitor": "Display — brightness and monitors", "omarchy.power": "Battery and power — click for details and power modes", "hugo.power": "Battery and power — click for details and power modes", "omarchy.tailscale": "Tailscale — private network", "io.github.hugorolimf.clock": "Calendar — click to open"})
+  readonly property var enText: ({" · zera em ": " · resets in ", "Mudo": "Muted", "Cabo": "Wired", "Sem conexão": "Offline", "Conectado": "Connected", "Desligado": "Off", "Nenhum aparelho": "No devices", "Ligado": "On", " · carregando": " · charging", ", cheia em ": ", full in ", " · carregada": " · charged", " restantes": " left"})
+  function tr(text) { return portuguese ? text : (enText[text] !== undefined ? enText[text] : text) }
+  function tipFor(id) { return (portuguese ? ptTips[id] : enTips[id]) || "" }
+  function ptText(text) {
+    if (!portuguese) return text
+    return ptTexts[text] !== undefined ? ptTexts[text] : text
+  }
+
+  function showTooltip(target, text) {
+    clearTooltip()
+    text = ptText(text)
+
+    if (!targetTooltipHovered(target) || !text) {
+      tooltipRequest += 1
+      return
+    }
+
+    var request = tooltipRequest + 1
+    tooltipRequest = request
+    pendingTooltipTarget = target
+    pendingTooltipText = text
+
+    Qt.callLater(function() {
+      if (request !== tooltipRequest) return
+      if (!targetTooltipHovered(pendingTooltipTarget)) {
+        clearTooltip()
+        return
+      }
+      tooltipTarget = pendingTooltipTarget
+      tooltipText = pendingTooltipText
+      pendingTooltipTarget = null
+      pendingTooltipText = ""
+      tooltipTimer.restart()
+    })
+  }
+
+  function hideTooltip(target) {
+    if (tooltipTarget !== target && pendingTooltipTarget !== target) return
+
+    tooltipRequest += 1
+    clearTooltip()
+  }
+
+  Timer {
+    id: tooltipTimer
+    interval: 400
+    onTriggered: {
+      if (root.targetTooltipHovered(root.tooltipTarget)) root.tooltipShown = true
+      else root.clearTooltip()
+    }
+  }
+
+  Timer {
+    interval: 100
+    running: root.tooltipShown
+    repeat: true
+    onTriggered: if (!root.targetTooltipHovered(root.tooltipTarget)) root.hideTooltip(root.tooltipTarget)
+  }
+
+  // Presence of the `bar-off` flag = bar hidden. Watching the parent toggles
+  // directory because FileView can't observe a file that doesn't exist yet,
+  // and the flag is created/removed by `omarchy-toggle-bar`.
+  Process {
+    id: barHiddenProbe
+    running: true
+    command: ["bash", "-c", "[[ -f $HOME/.local/state/omarchy/toggles/bar-off ]] && echo yes || echo no"]
+    stdout: SplitParser { onRead: function(line) { root.barHidden = String(line).trim() === "yes" } }
+  }
+  FileView {
+    path: root.home + "/.local/state/omarchy/toggles"
+    watchChanges: true
+    printErrors: false
+    onFileChanged: barHiddenProbe.running = true
+  }
+
+  // The directory watch can permanently stop delivering events after flag
+  // changes land in quick succession, stranding the bar off screen until the
+  // shell restarts. `omarchy-toggle-bar` nudges this after flipping the flag
+  // so the probe re-reads it even when the watch has gone quiet.
+  IpcHandler {
+    target: "omarchy.bar"
+
+    // Start rather than restart: a probe already in flight was launched by the
+    // directory watch after the flag flipped, so its answer is current, and
+    // killing it here can swallow the result entirely.
+    function syncHidden(): void {
+      barHiddenProbe.running = true
+    }
+  }
+
+  Variants {
+    model: Quickshell.screens
+
+    delegate: Component {
+      BarPanel {
+        required property var modelData
+
+        screen: modelData
+      }
+    }
+  }
+
+  Variants {
+    model: Quickshell.screens
+
+    delegate: Component {
+      DragGhostPanel {
+        required property var modelData
+
+        screen: modelData
+        ghostScreen: modelData
+      }
+    }
+  }
+
+  Variants {
+    model: Quickshell.screens
+
+    delegate: Component {
+      BarMoveGhostPanel {
+        required property var modelData
+
+        screen: modelData
+        ghostScreen: modelData
+      }
+    }
+  }
+
+  component BarPanel: PanelWindow {
+    id: barWindow
+
+    // Hiding parks the bar just past its screen edge instead of unmapping it.
+    // Unmapping frees the layer surface and the whole scene graph, so every
+    // reveal has to rebuild them — new surface, re-shaped glyphs, re-uploaded
+    // textures — which measures ~150ms against ~20ms to tear down. Parking
+    // keeps the surface alive, so showing is only a margin change.
+    visible: !remapGuard.remapping
+    exclusionMode: root.barHidden ? ExclusionMode.Ignore : ExclusionMode.Auto
+
+    ScreenMoveRemap {
+      id: remapGuard
+      window: barWindow
+    }
+
+    margins {
+      top: root.barHidden && root.position === "top" ? -root.barSize : 0
+      bottom: root.barHidden && root.position === "bottom" ? -root.barSize : 0
+      left: root.barHidden && root.position === "left" ? -root.barSize : 0
+      right: root.barHidden && root.position === "right" ? -root.barSize : 0
+    }
+
+    anchors {
+      top: root.position === "top" || root.vertical
+      bottom: root.position === "bottom" || root.vertical
+      left: root.position === "left" || !root.vertical
+      right: root.position === "right" || !root.vertical
+    }
+
+    implicitWidth: root.vertical ? root.barSize : 0
+    implicitHeight: root.vertical ? 0 : root.barSize
+    color: root.transparent ? "transparent" : root.background
+    surfaceFormat.opaque: false
+    WlrLayershell.namespace: "omarchy-bar"
+    WlrLayershell.layer: WlrLayer.Top
+
+    Loader {
+      anchors.fill: parent
+      sourceComponent: root.vertical ? verticalBar : horizontalBar
+
+      // A child of the loader, not a sibling of the sections: an ancestor stays
+      // hovered while the pointer is over a widget, where a sibling would lose
+      // hover to the section the pointer entered.
+      HoverHandler {
+        onHoveredChanged: root.setBarHovered(hovered)
+        // Unplugging a monitor destroys its bar without a leave event, which
+        // would strand this surface's tally and hold the peek open for good.
+        Component.onDestruction: if (hovered) root.setBarHovered(false)
+      }
+    }
+
+    PopupWindow {
+      id: tooltipWindow
+
+      visible: root.tooltipShown && root.tooltipTarget !== null && root.tooltipText !== "" && root.targetBelongsToWindow(root.tooltipTarget, barWindow)
+      color: "transparent"
+      implicitWidth: Math.ceil(tooltipBubble.implicitWidth)
+      implicitHeight: Math.ceil(tooltipBubble.implicitHeight)
+
+      anchor {
+        id: tooltipAnchor
+        window: barWindow
+        adjustment: PopupAdjustment.Slide
+        edges: Edges.Top | Edges.Left
+        gravity: Edges.Bottom | Edges.Right
+        rect.width: 1
+        rect.height: 1
+
+        onAnchoring: {
+          var target = root.tooltipTarget
+          if (!root.targetBelongsToWindow(target, barWindow)) return
+
+          var popupWidth = tooltipWindow.implicitWidth
+          var popupHeight = tooltipWindow.implicitHeight
+          var localX = target.width / 2 - popupWidth / 2
+          var localY = target.height + 6
+
+          if (root.position === "bottom") {
+            localY = -popupHeight - 6
+          } else if (root.position === "left") {
+            localX = target.width + 6
+            localY = target.height / 2 - popupHeight / 2
+          } else if (root.position === "right") {
+            localX = -popupWidth - 6
+            localY = target.height / 2 - popupHeight / 2
+          }
+
+          var point = barWindow.contentItem.mapFromItem(target, localX, localY)
+          tooltipAnchor.rect.x = Math.round(point.x)
+          tooltipAnchor.rect.y = Math.round(point.y)
+        }
+      }
+
+      BorderSurface {
+        id: tooltipBubble
+        implicitWidth: tooltipLabel.implicitWidth + 20
+        implicitHeight: tooltipLabel.implicitHeight + 14
+        color: Commons.Color.tooltip.background
+        borderSpec: Border.surfaceSpec("tooltip", "border", Commons.Color.tooltip.border, 1)
+        radius: Style.cornerRadius
+
+        Text {
+          id: tooltipLabel
+          textFormat: Text.PlainText
+          anchors.centerIn: parent
+          text: root.tooltipText
+          color: Commons.Color.tooltip.text
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.body
+          horizontalAlignment: Text.AlignHCenter
+          verticalAlignment: Text.AlignVCenter
+        }
+      }
+    }
+
+    Component {
+      id: horizontalBar
+
+      Item {
+        anchors.fill: parent
+
+        CenterModules { anchors.fill: parent }
+
+        LeftModules {
+          anchors.left: parent.left
+          anchors.leftMargin: Style.space(8)
+          anchors.verticalCenter: parent.verticalCenter
+        }
+
+        RightModules {
+          anchors.right: parent.right
+          anchors.rightMargin: Style.space(8)
+          anchors.verticalCenter: parent.verticalCenter
+        }
+      }
+    }
+
+    Component {
+      id: verticalBar
+
+      Item {
+        anchors.fill: parent
+
+        CenterModules { anchors.fill: parent }
+
+        LeftModules {
+          anchors.top: parent.top
+          anchors.topMargin: Style.space(8)
+          anchors.horizontalCenter: parent.horizontalCenter
+        }
+
+        RightModules {
+          anchors.bottom: parent.bottom
+          anchors.bottomMargin: Style.space(8)
+          anchors.horizontalCenter: parent.horizontalCenter
+        }
+      }
+    }
+  }
+
+  Component { id: emptyModuleComponent; Item { implicitWidth: 0; implicitHeight: 0; visible: false } }
+
+  component DragGhostPanel: PanelWindow {
+    id: ghostWindow
+
+    required property var ghostScreen
+    readonly property bool screenMatches: root.barDragScreen === ghostScreen ||
+      (root.barDragScreen && ghostScreen && root.barDragScreen.name && ghostScreen.name && root.barDragScreen.name === ghostScreen.name)
+    readonly property bool active: root.barDragSource && root.barDragScreen && screenMatches
+    readonly property var sourceItem: root.barDragSource ? root.barDragSource.activeItem : null
+    readonly property int ghostPadding: Style.space(1)
+    readonly property int ghostWidth: sourceItem ? Math.max(1, Math.ceil(sourceItem.width)) : 1
+    readonly property int ghostHeight: sourceItem ? Math.max(1, Math.ceil(sourceItem.height)) : 1
+
+    visible: active && sourceItem !== null
+    color: "transparent"
+    exclusionMode: ExclusionMode.Ignore
+    WlrLayershell.namespace: "omarchy-bar-drag-ghost"
+    WlrLayershell.layer: WlrLayer.Overlay
+    WlrLayershell.keyboardFocus: WlrKeyboardFocus.None
+
+    anchors {
+      top: true
+      bottom: true
+      left: true
+      right: true
+    }
+
+    // Visual-only drag feedback. Keep the input region empty so the ghost can
+    // sit under the cursor without stealing the MouseArea's active pointer grab.
+    mask: Region {}
+
+    Item {
+      visible: ghostWindow.visible
+      x: Math.round(root.barDragScreenX - root.barDragOffsetX - ghostWindow.ghostPadding)
+      y: Math.round(root.barDragScreenY - root.barDragOffsetY - ghostWindow.ghostPadding)
+      width: ghostWindow.ghostWidth + ghostWindow.ghostPadding * 2
+      height: ghostWindow.ghostHeight + ghostWindow.ghostPadding * 2
+
+      BorderSurface {
+        anchors.fill: parent
+        color: root.transparent ? "transparent" : root.background
+        borderSpec: Border.flat(root.barForeground, 1)
+        radius: Math.min(Style.cornerRadius, height / 2)
+        opacity: root.transparent ? 0.45 : 0.94
+      }
+
+      Image {
+        anchors.fill: parent
+        anchors.margins: ghostWindow.ghostPadding
+        source: root.barDragImageUrl
+        fillMode: Image.Stretch
+        smooth: true
+        opacity: 0.84
+      }
+    }
+
+    Rectangle {
+      readonly property var targetRect: root.barDragTargetGeometry
+
+      visible: ghostWindow.active && targetRect !== null
+      x: targetRect ? Math.round(targetRect.x) : 0
+      y: targetRect ? Math.round(targetRect.y) : 0
+      width: targetRect ? targetRect.width : 0
+      height: targetRect ? targetRect.height : 0
+      color: Commons.Color.accent
+      radius: Math.min(width, height) / 2
+    }
+  }
+
+  component BarMoveGhostPanel: PanelWindow {
+    id: moveGhostWindow
+
+    required property var ghostScreen
+    readonly property bool screenMatches: root.barMoveScreen === ghostScreen ||
+      (root.barMoveScreen && ghostScreen && root.barMoveScreen.name && ghostScreen.name && root.barMoveScreen.name === ghostScreen.name)
+    visible: root.barMoveActive && screenMatches
+    color: "transparent"
+    exclusionMode: ExclusionMode.Ignore
+    WlrLayershell.namespace: "omarchy-bar-move-ghost"
+    WlrLayershell.layer: WlrLayer.Overlay
+    WlrLayershell.keyboardFocus: WlrKeyboardFocus.None
+
+    anchors {
+      top: true
+      bottom: true
+      left: true
+      right: true
+    }
+
+    // Visual-only preview of the candidate edge. Keep the input region empty
+    // so the overlay never steals the gesture area's active pointer grab.
+    mask: Region {}
+
+    // One fixed-geometry slab per edge, crossfaded on candidate changes.
+    // Resizing a single slab between edges repaints mid-transition and
+    // flickers; fading between static ones does not.
+    Repeater {
+      model: ["top", "bottom", "left", "right"]
+
+      BorderSurface {
+        id: edgeSlab
+
+        required property string modelData
+        readonly property bool edgeVertical: modelData === "left" || modelData === "right"
+        readonly property int edgeSize: edgeVertical ? Style.bar.sizeVertical : Style.bar.sizeHorizontal
+
+        x: modelData === "right" ? parent.width - edgeSize : 0
+        y: modelData === "bottom" ? parent.height - edgeSize : 0
+        width: edgeVertical ? edgeSize : parent.width
+        height: edgeVertical ? parent.height : edgeSize
+        color: root.transparent ? "transparent" : root.background
+        borderSpec: Border.flat(root.barForeground, 1)
+        visible: opacity > 0
+        opacity: root.barMoveCandidate === modelData ? (root.transparent ? 0.45 : 0.7) : 0
+
+        Behavior on opacity {
+          NumberAnimation { duration: 140; easing.type: Easing.OutCubic }
+        }
+      }
+    }
+  }
+
+  function findCenterAnchorEntry() {
+    var entries = root.layoutEntries("center")
+    var idx = root.entryIndex(entries, root.centerAnchor)
+    return idx === -1 ? null : entries[idx]
+  }
+
+  component LeftModules: ModuleList {
+    entries: root.layoutEntries("left")
+    region: "left"
+  }
+
+  component RightModules: ModuleList {
+    entries: root.layoutEntries("right")
+    region: "right"
+  }
+
+  component CenterModules: Item {
+    id: centerRoot
+
+    property var entries: root.layoutEntries("center")
+    readonly property bool hasAnchor: root.entryIndex(entries, root.centerAnchor) !== -1
+    readonly property var anchorEntry: root.findCenterAnchorEntry()
+
+    Loader {
+      anchors.fill: parent
+      sourceComponent: root.vertical ? verticalCenterModules : horizontalCenterModules
+    }
+
+    Component {
+      id: horizontalCenterModules
+
+      Item {
+        anchors.fill: parent
+
+        CenterGestureArea { anchors.fill: parent }
+
+        HoverHandler {
+          onHoveredChanged: root.setCenterSectionHovered(hovered)
+        }
+
+        ModuleList {
+          visible: !centerRoot.hasAnchor
+          entries: centerRoot.entries
+          region: "center"
+          anchors.centerIn: parent
+        }
+
+        ModuleList {
+          visible: centerRoot.hasAnchor
+          entries: root.entriesBefore(centerRoot.entries, root.centerAnchor)
+          region: "center"
+          anchors.right: centerAnchorModule.left
+          anchors.verticalCenter: centerAnchorModule.verticalCenter
+        }
+
+        ModuleSlot {
+          id: centerAnchorModule
+          visible: centerRoot.hasAnchor
+          entry: centerRoot.anchorEntry
+          region: "center"
+          anchors.centerIn: parent
+        }
+
+        ModuleList {
+          visible: centerRoot.hasAnchor
+          entries: root.entriesAfter(centerRoot.entries, root.centerAnchor)
+          region: "center"
+          anchors.left: centerAnchorModule.right
+          anchors.verticalCenter: centerAnchorModule.verticalCenter
+        }
+      }
+    }
+
+    Component {
+      id: verticalCenterModules
+
+      Item {
+        anchors.fill: parent
+
+        CenterGestureArea { anchors.fill: parent }
+
+        HoverHandler {
+          onHoveredChanged: root.setCenterSectionHovered(hovered)
+        }
+
+        ModuleList {
+          visible: !centerRoot.hasAnchor
+          entries: centerRoot.entries
+          region: "center"
+          anchors.centerIn: parent
+        }
+
+        ModuleList {
+          visible: centerRoot.hasAnchor
+          entries: root.entriesBefore(centerRoot.entries, root.centerAnchor)
+          region: "center"
+          anchors.bottom: centerAnchorModule.top
+          anchors.horizontalCenter: centerAnchorModule.horizontalCenter
+        }
+
+        ModuleSlot {
+          id: centerAnchorModule
+          visible: centerRoot.hasAnchor
+          entry: centerRoot.anchorEntry
+          region: "center"
+          anchors.centerIn: parent
+        }
+
+        ModuleList {
+          visible: centerRoot.hasAnchor
+          entries: root.entriesAfter(centerRoot.entries, root.centerAnchor)
+          region: "center"
+          anchors.top: centerAnchorModule.bottom
+          anchors.horizontalCenter: centerAnchorModule.horizontalCenter
+        }
+      }
+    }
+  }
+
+  component CenterGestureArea: MouseArea {
+    id: gestureArea
+
+    property bool dragging: false
+    property bool suppressClick: false
+    property real pressedX: 0
+    property real pressedY: 0
+    readonly property real dragThreshold: Style.space(4)
+
+    acceptedButtons: Qt.LeftButton
+    cursorShape: dragging ? Qt.ClosedHandCursor : Qt.ArrowCursor
+    pressAndHoldInterval: 200
+
+    function startDrag(x, y) {
+      if (dragging) return
+      dragging = true
+      root.beginBarMove(root.targetWindow(gestureArea))
+      var scenePoint = gestureArea.mapToItem(null, x, y)
+      root.updateBarMove(root.windowScreenPoint(scenePoint, root.barMoveWindow))
+    }
+
+    onPressed: function(mouse) {
+      dragging = false
+      suppressClick = false
+      pressedX = mouse.x
+      pressedY = mouse.y
+    }
+
+    onPressAndHold: function(mouse) {
+      // A widget above us propagates its composed press-and-hold down here without
+      // ever handing over the grab, so we'd get no release or cancel to end the move.
+      if (!gestureArea.pressed) return
+      startDrag(mouse.x, mouse.y)
+    }
+
+    onPositionChanged: function(mouse) {
+      if (!(mouse.buttons & Qt.LeftButton)) return
+
+      if (!dragging) {
+        var distance = Math.abs(mouse.x - pressedX) + Math.abs(mouse.y - pressedY)
+        if (distance < dragThreshold) return
+        startDrag(mouse.x, mouse.y)
+        return
+      }
+
+      var scenePoint = gestureArea.mapToItem(null, mouse.x, mouse.y)
+      root.updateBarMove(root.windowScreenPoint(scenePoint, root.barMoveWindow))
+    }
+
+    onReleased: function(mouse) {
+      if (!dragging) return
+      dragging = false
+      suppressClick = true
+      root.finishBarMove()
+      mouse.accepted = true
+    }
+
+    onCanceled: {
+      dragging = false
+      suppressClick = false
+      root.clearBarMove()
+    }
+
+    onClicked: function(mouse) {
+      if (suppressClick) {
+        suppressClick = false
+        mouse.accepted = true
+      }
+    }
+
+    onDoubleClicked: function(mouse) {
+      if (suppressClick) {
+        suppressClick = false
+        return
+      }
+      if (mouse.button === Qt.LeftButton) {
+        root.toggleTransparency()
+        mouse.accepted = true
+      }
+    }
+  }
+
+  component ModuleList: Loader {
+    id: moduleListRoot
+
+    property var entries: []
+    property string region: ""
+
+    visible: entries.length > 0
+    // A hidden list must not build its modules. The center section declares
+    // both an anchored and an unanchored arrangement and shows whichever
+    // fits, so leaving the other one loaded mounts every center module
+    // twice — two IPC handlers registered for the same target, two clocks
+    // ticking, two of every timer and fetch behind them.
+    active: visible && entries.length > 0
+    sourceComponent: root.vertical ? verticalModuleList : horizontalModuleList
+    width: item ? item.implicitWidth : 0
+    height: item ? item.implicitHeight : 0
+
+    // Glass Bar: consecutive entries sharing a "group" (shell.json) sit
+    // together on a rounded island; entries without one stand on their own.
+    // An island whose icons are all hidden takes no room.
+    Component {
+      id: horizontalModuleList
+
+      Row {
+        spacing: Style.space(6)
+
+        Repeater {
+          model: root.islandsOf(moduleListRoot.entries)
+
+          Item {
+            id: island
+            required property var modelData
+            readonly property bool framed: modelData.group !== ""
+            readonly property real pad: framed ? Style.space(4) : 0
+            // Not `visible: false` when empty: hiding the island would hide its
+            // icons too, and a hidden icon reports no width, so it would never
+            // come back. An empty island just takes no room.
+            readonly property bool empty: islandRow.implicitWidth <= 0
+            implicitWidth: empty ? 0 : islandRow.implicitWidth + pad * 2
+            implicitHeight: islandRow.implicitHeight
+            width: implicitWidth
+            height: implicitHeight
+
+            Rectangle {
+              visible: island.framed && !island.empty
+              anchors.verticalCenter: parent.verticalCenter
+              width: parent.width
+              height: Math.max(0, root.barSize - Style.space(6))
+              radius: height / 2
+              color: Qt.rgba(1, 1, 1, 0.03)
+              border.width: 0.6
+              border.color: Qt.rgba(1, 1, 1, 0.08)
+            }
+
+            Row {
+              id: islandRow
+              x: island.pad
+              spacing: 0
+
+              Repeater {
+                model: island.modelData.entries
+
+                ModuleSlot {
+                  required property var modelData
+                  entry: modelData
+                  region: moduleListRoot.region
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+
+    Component {
+      id: verticalModuleList
+
+      Column {
+        spacing: 0
+
+        Repeater {
+          model: moduleListRoot.entries
+
+          ModuleSlot {
+            required property var modelData
+            entry: modelData
+            region: moduleListRoot.region
+          }
+        }
+      }
+    }
+  }
+
+  component ModuleSlot: Item {
+    id: slot
+
+    required property var entry
+    property string region: ""
+    readonly property string moduleName: root.entryId(entry)
+    readonly property var moduleSettings: root.entrySettings(entry)
+    readonly property string customType: root.customModuleType(entry)
+    readonly property var registryMetadata: root.barWidgetRegistry.metadataFor(root.canonicalWidgetId(moduleName))
+    readonly property bool firstParty: registryMetadata && registryMetadata.firstParty === true
+    readonly property string pluginApiId: registered ? root.canonicalWidgetId(moduleName) : "bar-entry:" + moduleName
+    // Re-evaluate when the registry mutates (Component reference changes,
+    // plugin enabled/disabled, etc.). Reading the `widgets` property creates
+    // the binding dependency — the wrapped function call alone wouldn't.
+    readonly property var registryComponent: {
+      var w = root.barWidgetRegistry.widgets
+      if (customType) return null
+      var registryName = root.canonicalWidgetId(moduleName)
+      return w[registryName] ? w[registryName].component : null
+    }
+    readonly property bool qmlCustom: customType === "qml"
+    readonly property bool commandCustom: customType === "command"
+    readonly property bool registered: registryComponent !== null
+    readonly property var activeItem: {
+      if (registered) return registryLoader.item
+      if (qmlCustom) return qmlLoader.item
+      return componentLoader.item
+    }
+    readonly property bool hovered: moduleHover.hovered
+    readonly property bool dragSource: root.barDragSource === slot
+    readonly property bool panelOpen: root.activePopout === slot.activeItem
+    // Modules bigger than the mark they want (a text label in a padded slot,
+    // a multi-line stack on a vertical bar) can say how long the open-panel
+    // dot should be along the bar, so it tracks what the module paints
+    // instead of a fraction of whatever slot it happens to fill.
+    readonly property real panelIndicatorExtent: {
+      var key = root.vertical ? "openPanelIndicatorHeight" : "openPanelIndicatorWidth"
+      var hint = activeItem && key in activeItem ? activeItem[key] : undefined
+      if (hint !== undefined && hint !== null && hint > 0) return Math.round(hint)
+      return Math.max(Style.space(10), Math.round((root.vertical ? slot.height : slot.width) * 0.55))
+    }
+    // Glass Bar: the widget keeps its own width (baseWidth); hovering a widget
+    // with something to say (volume, network, battery...) widens the slot
+    // smoothly and shows that value beside the icon (root.liveLabel).
+    readonly property real baseWidth: activeItem && activeItem.visible ? (root.vertical ? root.barSize : activeItem.implicitWidth) : 0
+    // eased copy of baseWidth, so icons coming and going slide the bar
+    // instead of jumping
+    property real shownBase: baseWidth
+    Behavior on shownBase { NumberAnimation { duration: 400; easing.type: Easing.Bezier; easing.bezierCurve: root.easeCurve } }
+    readonly property string liveLabel: root.vertical ? "" : root.liveLabel(moduleName, activeItem, moduleHover.hovered || root.peekValues)
+    readonly property var ownIcon: root.vertical ? null : root.iconFor(moduleName, activeItem)
+    readonly property bool expanded: (moduleHover.hovered || root.peekValues || !!(ownIcon && ownIcon.always)) && liveLabel !== "" && !root.barDragSource
+    property real labelRoom: expanded ? liveText.implicitWidth + Style.space(8) : 0
+    Behavior on labelRoom { NumberAnimation { duration: 450; easing.type: Easing.Bezier; easing.bezierCurve: root.easeCurve } }
+    clip: labelRoom > 0 || shownBase !== baseWidth
+    implicitWidth: shownBase + labelRoom
+    implicitHeight: activeItem && activeItem.visible ? activeItem.implicitHeight : 0
+    width: implicitWidth
+    height: implicitHeight
+    opacity: baseWidth > 0 ? 1 : 0
+    Behavior on opacity { NumberAnimation { duration: 200 } }
+
+    // Soft highlight behind the hovered icon.
+    Rectangle {
+      anchors.verticalCenter: parent.verticalCenter
+      x: Style.space(1)
+      width: parent.width - Style.space(2)
+      height: Math.max(0, root.barSize - Style.space(10))
+      radius: height / 2
+      color: root.barForeground
+      opacity: moduleHover.hovered && !root.barDragSource ? 0.07 : 0
+      Behavior on opacity { NumberAnimation { duration: 250; easing.type: Easing.Bezier; easing.bezierCurve: root.easeCurve } }
+    }
+    z: modulePointer.dragging ? 100 : 0
+
+    Component.onCompleted: root.registerModuleSlot(slot)
+    Component.onDestruction: {
+      if (root.barDragSource === slot) root.clearBarDrag()
+      root.unregisterModuleSlot(slot)
+    }
+
+    HoverHandler {
+      id: moduleHover
+      // Glass Bar: describe the icon in Portuguese (see root.ptTips).
+      onHoveredChanged: {
+        if (hovered && slot.moduleName === "omarchy.network") root.refreshWifiName()
+        if (!slot.ptTip) return
+        if (hovered && !root.barDragSource) root.showTooltip(slot, slot.ptTip)
+        else root.hideTooltip(slot)
+      }
+    }
+    readonly property string ptTip: root.tipFor(moduleName)
+    readonly property bool tooltipHovered: moduleHover.hovered
+
+    BorderSurface {
+      visible: slot.dragSource
+      anchors.fill: parent
+      anchors.margins: Style.space(1)
+      color: root.transparent ? "transparent" : root.background
+      borderSpec: Border.flat(root.barForeground, 1)
+      radius: Math.min(Style.cornerRadius, height / 2)
+      opacity: root.transparent ? 0.22 : 0.32
+    }
+
+    Loader {
+      id: componentLoader
+      active: !slot.qmlCustom && !slot.registered
+      sourceComponent: slot.commandCustom ? customCommandModuleComponent : emptyModuleComponent
+      anchors.left: parent.left
+      anchors.top: parent.top
+      anchors.bottom: parent.bottom
+      width: slot.baseWidth
+      opacity: slot.ownIcon ? 0 : (slot.dragSource ? 0.22 : 1.0)
+      onLoaded: {
+        slot.injectProps()
+        Qt.callLater(slot.injectProps)
+      }
+    }
+
+    Loader {
+      id: registryLoader
+      active: slot.registered
+      sourceComponent: slot.registered ? slot.registryComponent : null
+      anchors.left: parent.left
+      anchors.top: parent.top
+      anchors.bottom: parent.bottom
+      width: slot.baseWidth
+      opacity: slot.ownIcon ? 0 : (slot.dragSource ? 0.22 : 1.0)
+      onLoaded: {
+        slot.injectProps()
+        Qt.callLater(slot.injectProps)
+      }
+    }
+
+    Loader {
+      id: qmlLoader
+      active: slot.qmlCustom
+      source: slot.qmlCustom ? root.customModuleSource(slot.entry) : ""
+      anchors.left: parent.left
+      anchors.top: parent.top
+      anchors.bottom: parent.bottom
+      width: slot.baseWidth
+      opacity: slot.ownIcon ? 0 : (slot.dragSource ? 0.22 : 1.0)
+      onLoaded: {
+        slot.injectProps()
+        Qt.callLater(slot.injectProps)
+      }
+    }
+
+    // Glass Bar: the weather opens as a card in the notch (Glass Island,
+    // Dynamic Island style). If the notch can't (not installed yet, or the
+    // call fails), the weather's own panel opens as before.
+    MouseArea {
+      visible: slot.moduleName === "omarchy.weather" && !root.vertical
+      anchors.fill: parent
+      acceptedButtons: Qt.LeftButton
+      cursorShape: Qt.PointingHandCursor
+      onClicked: islandCard.running = true
+    }
+    Process {
+      id: islandCard
+      command: ["omarchy-shell", "io.github.hugorolimf.island", "card", "weather"]
+      onExited: function(code) {
+        if (code === 0) return
+        var w = slot.activeItem
+        if (w && typeof w.togglePanel === "function") w.togglePanel()
+        else if (w && typeof w.open === "function") w.open()
+      }
+    }
+
+    // The bar's own icon (root.iconFor), drawn in strokes; it lifts a little
+    // on hover and pops when its state changes (volume step, Wi-Fi bars...).
+    Item {
+      id: ownGlyph
+      visible: !!slot.ownIcon
+      readonly property real size: 16
+      readonly property var parts: slot.ownIcon ? slot.ownIcon.parts : []
+      readonly property color ink: root.toneColor(slot.ownIcon ? slot.ownIcon.tone : "")
+      readonly property string key: slot.ownIcon ? slot.ownIcon.key : ""
+      width: size
+      height: size
+      x: (slot.baseWidth - size) / 2
+      y: (slot.height - size) / 2 - (moduleHover.hovered ? 0.5 : 0)
+      opacity: slot.dragSource ? 0.22 : 1.0
+      scale: 1
+      Behavior on y { NumberAnimation { duration: 350; easing.type: Easing.Bezier; easing.bezierCurve: root.easeCurve } }
+      onKeyChanged: if (key !== "") iconPop.restart()
+      SequentialAnimation {
+        id: iconPop
+        NumberAnimation { target: ownGlyph; property: "scale"; to: 0.78; duration: 90; easing.type: Easing.InCubic }
+        NumberAnimation { target: ownGlyph; property: "scale"; to: 1; duration: 380; easing.type: Easing.Bezier; easing.bezierCurve: root.easeCurve }
+      }
+
+      Shape {
+        width: 24
+        height: 24
+        scale: ownGlyph.size / 24
+        transformOrigin: Item.TopLeft
+        preferredRendererType: Shape.CurveRenderer
+        ShapePath { id: sp0; readonly property var part: ownGlyph.parts[0]; strokeWidth: 1.8; capStyle: ShapePath.RoundCap; joinStyle: ShapePath.RoundJoin
+          strokeColor: part && !part.f ? Qt.rgba(ownGlyph.ink.r, ownGlyph.ink.g, ownGlyph.ink.b, part.a) : "transparent"
+          fillColor: part && part.f ? Qt.rgba(ownGlyph.ink.r, ownGlyph.ink.g, ownGlyph.ink.b, part.a) : "transparent"
+          PathSvg { path: sp0.part ? sp0.part.d : "" } }
+        ShapePath { id: sp1; readonly property var part: ownGlyph.parts[1]; strokeWidth: 1.8; capStyle: ShapePath.RoundCap; joinStyle: ShapePath.RoundJoin
+          strokeColor: part && !part.f ? Qt.rgba(ownGlyph.ink.r, ownGlyph.ink.g, ownGlyph.ink.b, part.a) : "transparent"
+          fillColor: part && part.f ? Qt.rgba(ownGlyph.ink.r, ownGlyph.ink.g, ownGlyph.ink.b, part.a) : "transparent"
+          PathSvg { path: sp1.part ? sp1.part.d : "" } }
+        ShapePath { id: sp2; readonly property var part: ownGlyph.parts[2]; strokeWidth: 1.8; capStyle: ShapePath.RoundCap; joinStyle: ShapePath.RoundJoin
+          strokeColor: part && !part.f ? Qt.rgba(ownGlyph.ink.r, ownGlyph.ink.g, ownGlyph.ink.b, part.a) : "transparent"
+          fillColor: part && part.f ? Qt.rgba(ownGlyph.ink.r, ownGlyph.ink.g, ownGlyph.ink.b, part.a) : "transparent"
+          PathSvg { path: sp2.part ? sp2.part.d : "" } }
+        ShapePath { id: sp3; readonly property var part: ownGlyph.parts[3]; strokeWidth: 1.8; capStyle: ShapePath.RoundCap; joinStyle: ShapePath.RoundJoin
+          strokeColor: part && !part.f ? Qt.rgba(ownGlyph.ink.r, ownGlyph.ink.g, ownGlyph.ink.b, part.a) : "transparent"
+          fillColor: part && part.f ? Qt.rgba(ownGlyph.ink.r, ownGlyph.ink.g, ownGlyph.ink.b, part.a) : "transparent"
+          PathSvg { path: sp3.part ? sp3.part.d : "" } }
+        ShapePath { id: sp4; readonly property var part: ownGlyph.parts[4]; strokeWidth: 1.8; capStyle: ShapePath.RoundCap; joinStyle: ShapePath.RoundJoin
+          strokeColor: part && !part.f ? Qt.rgba(ownGlyph.ink.r, ownGlyph.ink.g, ownGlyph.ink.b, part.a) : "transparent"
+          fillColor: part && part.f ? Qt.rgba(ownGlyph.ink.r, ownGlyph.ink.g, ownGlyph.ink.b, part.a) : "transparent"
+          PathSvg { path: sp4.part ? sp4.part.d : "" } }
+        ShapePath { id: sp5; readonly property var part: ownGlyph.parts[5]; strokeWidth: 1.8; capStyle: ShapePath.RoundCap; joinStyle: ShapePath.RoundJoin
+          strokeColor: part && !part.f ? Qt.rgba(ownGlyph.ink.r, ownGlyph.ink.g, ownGlyph.ink.b, part.a) : "transparent"
+          fillColor: part && part.f ? Qt.rgba(ownGlyph.ink.r, ownGlyph.ink.g, ownGlyph.ink.b, part.a) : "transparent"
+          PathSvg { path: sp5.part ? sp5.part.d : "" } }
+      }
+    }
+    Rectangle {
+      visible: !!slot.ownIcon && slot.ownIcon.badge > 0
+      x: slot.baseWidth / 2 + 3
+      y: Math.max(1, (slot.height - 18) / 2 - 3)
+      width: Math.max(height, badgeText.implicitWidth + 4)
+      height: 11
+      radius: height / 2
+      color: "#f5c26b"
+      Text {
+        id: badgeText
+        anchors.centerIn: parent
+        text: slot.ownIcon && slot.ownIcon.badge ? String(slot.ownIcon.badge) : ""
+        color: "#0b0b0b"
+        font.family: root.monoFamily
+        font.pixelSize: 8
+        font.bold: true
+      }
+    }
+
+    Text {
+      id: liveText
+      x: slot.baseWidth
+      anchors.verticalCenter: parent.verticalCenter
+      text: slot.liveLabel
+      color: slot.ownIcon && slot.ownIcon.always && slot.ownIcon.tone ? root.toneColor(slot.ownIcon.tone) : "#e6e6e6"
+      font.family: root.monoFamily
+      font.pixelSize: 11
+      font.weight: Font.Medium
+      opacity: slot.expanded ? 1 : 0
+      Behavior on opacity { NumberAnimation { duration: slot.expanded ? 300 : 120; easing.type: Easing.Bezier; easing.bezierCurve: root.easeCurve } }
+    }
+
+    Rectangle {
+      id: openPanelIndicator
+
+      readonly property int inset: Style.space(2)
+
+      visible: opacity > 0
+      opacity: slot.panelOpen && !slot.dragSource ? 0.9 : 0
+      color: Commons.Color.accent
+      radius: Math.min(width, height) / 2
+      width: root.vertical ? Style.space(2) : slot.panelIndicatorExtent
+      height: root.vertical ? slot.panelIndicatorExtent : Style.space(2)
+      // The mark sits on the module's inner edge — the one facing the
+      // desktop — so it underlines a top bar, overlines a bottom one, and
+      // points inward from a left or right one. It reads as pointing at the
+      // panel that opens on that side.
+      // Snap toward the start of the slot, matching native glyph rendering.
+      x: root.vertical
+        ? (root.position === "left" ? parent.width - width - inset : inset)
+        : Math.floor((parent.width - width) / 2)
+      y: root.vertical
+        ? Math.floor((parent.height - height) / 2)
+        : (root.position === "top" ? parent.height - height - inset : inset)
+      z: 50
+
+      Behavior on opacity {
+        NumberAnimation { duration: 120; easing.type: Easing.OutCubic }
+      }
+    }
+
+    MouseArea {
+      id: modulePointer
+
+      property bool dragging: false
+      property bool suppressClick: false
+      property real pressedX: 0
+      property real pressedY: 0
+      readonly property bool canReorder: root.shell && typeof root.shell.mutateShellConfig === "function"
+      readonly property real dragThreshold: Style.space(4)
+
+      anchors.fill: parent
+      acceptedButtons: Qt.LeftButton
+      enabled: slot.visible && slot.width > 0 && slot.height > 0
+      propagateComposedEvents: true
+      // Only the hovered slot needs the hit test; without the guard every
+      // slot on every monitor re-ran it on each click target change.
+      cursorShape: moduleHover.hovered && root.moduleClickTargetAt(slot, mouseX, mouseY) ? Qt.PointingHandCursor : Qt.ArrowCursor
+      // Do not assign drag.target here: ModuleSlot is owned by Row/Column
+      // positioners, and mutating slot.x/slot.y can leave stale offsets that
+      // make neighboring modules overlap after a small aborted drag.
+
+      onPressed: function(mouse) {
+        dragging = false
+        suppressClick = false
+        pressedX = mouse.x
+        pressedY = mouse.y
+        root.clearBarDrag()
+      }
+
+      onPositionChanged: function(mouse) {
+        if (!canReorder || !(mouse.buttons & Qt.LeftButton)) return
+
+        var distance = Math.abs(mouse.x - pressedX) + Math.abs(mouse.y - pressedY)
+        if (distance >= dragThreshold) {
+          if (!dragging) {
+            root.barDragWindow = root.targetWindow(slot.activeItem) || root.targetWindow(slot)
+            root.barDragScreen = root.barDragWindow ? root.barDragWindow.screen : null
+            root.barDragOffsetX = pressedX
+            root.barDragOffsetY = pressedY
+            root.captureBarDragGhost(slot)
+            root.barDragSource = slot
+          }
+          dragging = true
+          root.hideTooltip(slot.activeItem)
+        }
+
+        if (dragging) {
+          var scenePoint = slot.mapToItem(null, mouse.x, mouse.y)
+          var screenPoint = root.barDragScreenPoint(scenePoint)
+          root.barDragSceneX = scenePoint.x
+          root.barDragSceneY = scenePoint.y
+          root.barDragScreenX = screenPoint.x
+          root.barDragScreenY = screenPoint.y
+
+          var drop = root.moduleDropAtScene(scenePoint, slot)
+          root.barDragTarget = drop ? drop.slot : null
+          root.barDragAfter = drop ? drop.after : false
+          root.barDragTargetGeometry = drop ? root.dropMarkerRect(drop.slot, drop.after) : null
+        }
+      }
+
+      onReleased: function(mouse) {
+        var wasDragging = dragging
+        var targetSlot = root.barDragTarget
+        var afterTarget = root.barDragAfter
+
+        if (wasDragging) suppressClick = true
+
+        dragging = false
+        root.clearBarDrag()
+
+        if (wasDragging && targetSlot) {
+          root.dropBarModuleAtTarget(slot, targetSlot, afterTarget)
+          mouse.accepted = true
+        } else if (!wasDragging) {
+          mouse.accepted = false
+        }
+      }
+
+      onCanceled: {
+        dragging = false
+        suppressClick = false
+        root.clearBarDrag()
+      }
+
+      onClicked: function(mouse) {
+        if (suppressClick) {
+          suppressClick = false
+          mouse.accepted = true
+          return
+        }
+
+        if (!root.pressModuleClickTarget(slot, mouse.button, mouse.x, mouse.y)) mouse.accepted = false
+      }
+    }
+
+    onActiveItemChanged: Qt.callLater(injectProps)
+    onModuleSettingsChanged: injectProps()
+
+    function injectProps() {
+      var target = activeItem
+      if (!target) return
+      if ("bar" in target) target.bar = firstParty
+        ? root : root.pluginBarApiFor(pluginApiId, moduleName, registered)
+      if ("moduleName" in target) target.moduleName = moduleName
+      if ("settings" in target) target.settings = moduleSettings
+    }
+
+    Component {
+      id: customCommandModuleComponent
+      CustomCommandModule { entry: slot.entry }
+    }
+  }
+
+  component CustomCommandModule: WidgetButton {
+    id: customRoot
+
+    required property var entry
+    readonly property string moduleName: root.entryId(entry)
+    readonly property var settings: root.entrySettings(entry)
+    property string outputText: ""
+    property string outputTooltip: ""
+    property bool outputActive: false
+
+    function setting(name, fallback) {
+      var value = settings ? settings[name] : undefined
+      return value === undefined || value === null ? fallback : value
+    }
+
+    function update(raw) {
+      var data = Util.parseModuleJson(raw)
+      var klass = data.class || data.alt || ""
+
+      outputText = data.text || String(raw || "").trim()
+      outputTooltip = data.tooltip || String(setting("tooltip", ""))
+      outputActive = klass === "active" || (Array.isArray(klass) && klass.indexOf("active") !== -1)
+    }
+
+    bar: root
+    text: outputText || String(setting("text", ""))
+    tooltipText: outputTooltip || String(setting("tooltip", ""))
+    active: outputActive
+    keepSpace: setting("keepSpace", false) === true
+    horizontalMargin: Number(setting("horizontalMargin", 7.5))
+    verticalPadding: Number(setting("verticalPadding", 6))
+    fontSize: Number(setting("fontSize", 12))
+
+    onPressed: function(button) {
+      var command = ""
+      if (button === Qt.RightButton)
+        command = String(setting("onRightClick", ""))
+      else if (button === Qt.MiddleButton)
+        command = String(setting("onMiddleClick", ""))
+      else
+        command = String(setting("onClick", ""))
+
+      if (command) root.run(command)
+    }
+
+    Process {
+      id: customProc
+      command: ["bash", "-lc", String(customRoot.setting("exec", ""))]
+      stdout: StdioCollector {
+        waitForEnd: true
+        onStreamFinished: customRoot.update(text)
+      }
+    }
+
+    Timer {
+      interval: Math.max(1, Number(customRoot.setting("interval", 5))) * 1000
+      running: String(customRoot.setting("exec", "")) !== ""
+      repeat: true
+      triggeredOnStart: true
+      onTriggered: root.runProcess(customProc)
+    }
+  }
+}
