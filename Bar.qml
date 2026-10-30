@@ -1063,6 +1063,12 @@ Item {
     }
 
     if (moduleTargetClickable(slot.activeItem)) return slot.activeItem
+    // The slot is wider than its button when the bar paints a value beside
+    // the icon (AI usage "66%"): a click there still belongs to the module,
+    // so it goes to the module's own button.
+    for (var j = 0; j < clickTargets.length; j++) {
+      if (moduleTargetClickable(clickTargets[j]) && itemInside(clickTargets[j], slot)) return clickTargets[j]
+    }
     return null
   }
 
@@ -1372,8 +1378,11 @@ Item {
         return { key: "iphone" + (on ? Math.round(bat / 10) : "off"), tone: !on ? "dim" : bat >= 0 && bat < 10 ? "red" : bat >= 0 && bat < 20 ? "amber" : "",
                  badge: on && item.unread > 0 ? item.unread : 0, parts: ph }
       }
+      // Do Not Disturb: the bell red and slashed. `ring` swings it (a clear).
       if (id === "io.github.hugorolimf.inbox")
-        return { key: "bell", tone: item.opened === true ? "blue" : "", badge: item.unseen > 0 ? item.unseen : 0, parts: partsOf(["bell"]) }
+        return item.dnd === true
+          ? { key: "bell-dnd", tone: "red", badge: item.unseen > 0 ? item.unseen : 0, ring: item.clearSerial || 0, parts: partsOf(["bell", "slash"]) }
+          : { key: "bell", tone: item.opened === true ? "blue" : "", badge: item.unseen > 0 ? item.unseen : 0, ring: item.clearSerial || 0, parts: partsOf(["bell"]) }
       if (id === "io.github.hugorolimf.bar")
         return { key: "tools", tone: root.drawerOpen || root.drawerEdit || item.opened === true ? "blue" : "", parts: partsOf(["tools"]) }
       if (id === "omarchy.agents") {
@@ -1632,7 +1641,9 @@ Item {
     try {
       if (id === "io.github.hugorolimf.inbox") {
         var u = item.unseen || 0
-        return u > 0 ? u + (u === 1 ? root.tr(" nova") : root.tr(" novas")) : (hovered ? root.tr("nenhuma nova") : "")
+        var news = u > 0 ? u + (u === 1 ? root.tr(" nova") : root.tr(" novas")) : ""
+        if (item.dnd === true) return hovered ? (news ? news + " · " : "") + root.tr("não perturbe") : news
+        return news || (hovered ? root.tr("nenhuma nova") : "")
       }
       if (id === "io.github.hugorolimf.iphone") {
         if (item.connected !== true) return hovered ? root.tr("fora de alcance") : ""
@@ -1702,7 +1713,7 @@ Item {
   readonly property bool portuguese: Qt.locale().name.indexOf("pt") === 0
   readonly property var enTips: ({"omarchy.menu": "System menu — click to open · right-click opens a terminal", "yakumy.station": "Station — synced workspaces and displays", "omarchy.weather": "Weather — click for the forecast", "techspawn.projects": "Projects — your git repos: branch, changes, pull and push", "evindor.keystroke": "Keystroke — command palette for apps and actions", "omarchy.agents": "AI agents — limits and usage for Claude, Codex and others", "io.github.hugorolimf.dock": "Dock — dock settings", "io.github.fasi96.liquid-glass": "Liquid Glass — tune the terminals' glass", "omaplug": "Plugins — enable, disable and update plugins", "omarchy.system-update": "Updates available — click to update the system", "omarchy.bluetooth": "Bluetooth — click to see and connect devices · right-click toggles it", "omarchy.network": "Wi‑Fi and network — click to see networks", "omarchy.audio": "Sound — click for volume and outputs · scroll to adjust · right-click mutes", "omarchy.monitor": "Display — brightness and monitors", "omarchy.power": "Battery and power — click for details and power modes", "io.github.hugorolimf.power": "Battery and power — click for details and power modes", "omarchy.tailscale": "Tailscale — private network", "io.github.hugorolimf.clock": "Calendar — click to open", "io.github.hugorolimf.iphone": "iPhone — click to see your messages", "io.github.hugorolimf.bar": "Tools — open and organise the bar's plugins", "io.github.hugorolimf.inbox": "Notifications — history grouped by app", "io.github.hugorolimf.monitores": "Arrange displays — drag screens, resolution, scale and rotation"})
   readonly property var enExtraTips: ({"omarchy.microphone": "Microphone — mute and unmute the microphone", "omarchy.keyboard-layout": "Keyboard — switch the keyboard layout", "io.github.hugorolimf.island": "Island Notch — dictation, music, recording and alerts in the notch"})
-  readonly property var enText: ({" nova": " new", " novas": " new", "nenhuma nova": "nothing new", "fora de alcance": "out of range", " não lida": " unread", " não lidas": " unread", " · zera em ": " · resets in ", "Mudo": "Muted", "Cabo": "Wired", "Sem conexão": "Offline", "Conectado": "Connected", "Desligado": "Off", "Nenhum aparelho": "No devices", "Ligado": "On", " · carregando": " · charging", ", cheia em ": ", full in ", " · carregada": " · charged", " restantes": " left", "data, hora e o calendário do mês": "date, time and the month's calendar", "abrir": "open", "Na gaveta  ·  clique para fixar na barra": "In the drawer  ·  click to pin it to the bar", "Fixo na barra  ·  clique para guardar na gaveta": "Pinned to the bar  ·  click to keep it in the drawer"})
+  readonly property var enText: ({" nova": " new", " novas": " new", "nenhuma nova": "nothing new", "não perturbe": "do not disturb", "fora de alcance": "out of range", " não lida": " unread", " não lidas": " unread", " · zera em ": " · resets in ", "Mudo": "Muted", "Cabo": "Wired", "Sem conexão": "Offline", "Conectado": "Connected", "Desligado": "Off", "Nenhum aparelho": "No devices", "Ligado": "On", " · carregando": " · charging", ", cheia em ": ", full in ", " · carregada": " · charged", " restantes": " left", "data, hora e o calendário do mês": "date, time and the month's calendar", "abrir": "open", "Na gaveta  ·  clique para fixar na barra": "In the drawer  ·  click to pin it to the bar", "Fixo na barra  ·  clique para guardar na gaveta": "Pinned to the bar  ·  click to keep it in the drawer"})
   function tr(text) { return portuguese || enText[text] === undefined ? text : enText[text] }
   function tipFor(id) { return (portuguese ? ptTips[id] : enTips[id]) || "" }
   function extraTipFor(id) { return (portuguese ? toolExtraTips[id] : enExtraTips[id]) || "" }
@@ -2636,8 +2647,27 @@ Item {
       visible: !!slot.ownIcon
       readonly property real size: 16
       readonly property var parts: slot.ownIcon ? slot.ownIcon.parts : []
-      readonly property color ink: root.toneColor(slot.ownIcon ? slot.ownIcon.tone : "")
+      // a new tone (red, blue…) eases in instead of switching
+      property color ink: root.toneColor(slot.ownIcon ? slot.ownIcon.tone : "")
+      Behavior on ink { ColorAnimation { duration: 320; easing.type: Easing.Bezier; easing.bezierCurve: root.easeCurve } }
       readonly property string key: slot.ownIcon ? slot.ownIcon.key : ""
+      // `ring` going up swings the icon from its top, damped (the bell when
+      // notifications are cleared)
+      readonly property int ring: slot.ownIcon && slot.ownIcon.ring ? slot.ownIcon.ring : 0
+      property int ringSeen: 0
+      onRingChanged: {
+        if (ring > ringSeen) iconRing.restart()
+        ringSeen = ring
+      }
+      transform: Rotation { id: glyphSwing; origin.x: ownGlyph.size / 2; origin.y: 1.5; angle: 0 }
+      SequentialAnimation {
+        id: iconRing
+        NumberAnimation { target: glyphSwing; property: "angle"; to: -18; duration: 90; easing.type: Easing.OutCubic }
+        NumberAnimation { target: glyphSwing; property: "angle"; to: 14; duration: 150; easing.type: Easing.InOutSine }
+        NumberAnimation { target: glyphSwing; property: "angle"; to: -9; duration: 140; easing.type: Easing.InOutSine }
+        NumberAnimation { target: glyphSwing; property: "angle"; to: 5; duration: 130; easing.type: Easing.InOutSine }
+        NumberAnimation { target: glyphSwing; property: "angle"; to: 0; duration: 180; easing.type: Easing.OutCubic }
+      }
       width: size
       height: size
       x: (slot.baseWidth - size) / 2
@@ -2684,8 +2714,34 @@ Item {
           PathSvg { path: sp5.part ? sp5.part.d : "" } }
       }
     }
+    // The count pops in, bumps when it changes and shrinks away at zero
+    // (keeping its last number while it goes).
     Rectangle {
-      visible: !!slot.ownIcon && slot.ownIcon.badge > 0
+      id: ownBadge
+      readonly property int count: slot.ownIcon && slot.ownIcon.badge > 0 ? slot.ownIcon.badge : 0
+      property int shownCount: count
+      onCountChanged: {
+        if (count <= 0) return
+        if (shownCount > 0 && count !== shownCount && opacity > 0.99) badgeBump.restart()
+        shownCount = count
+      }
+      visible: !!slot.ownIcon && opacity > 0.01
+      opacity: count > 0 ? 1 : 0
+      scale: count > 0 ? 1 : 0.3
+      Behavior on opacity { NumberAnimation { duration: 220; easing.type: Easing.Bezier; easing.bezierCurve: root.easeCurve } }
+      Behavior on scale { NumberAnimation { duration: 340; easing.type: Easing.OutBack; easing.overshoot: 1.5 } }
+      transform: Scale { id: badgeScale; origin.x: ownBadge.width / 2; origin.y: ownBadge.height / 2 }
+      SequentialAnimation {
+        id: badgeBump
+        ParallelAnimation {
+          NumberAnimation { target: badgeScale; property: "xScale"; to: 1.3; duration: 110; easing.type: Easing.OutCubic }
+          NumberAnimation { target: badgeScale; property: "yScale"; to: 1.3; duration: 110; easing.type: Easing.OutCubic }
+        }
+        ParallelAnimation {
+          NumberAnimation { target: badgeScale; property: "xScale"; to: 1; duration: 260; easing.type: Easing.Bezier; easing.bezierCurve: root.easeCurve }
+          NumberAnimation { target: badgeScale; property: "yScale"; to: 1; duration: 260; easing.type: Easing.Bezier; easing.bezierCurve: root.easeCurve }
+        }
+      }
       x: slot.baseWidth / 2 + 3
       y: Math.max(1, (slot.height - 18) / 2 - 3)
       width: Math.max(height, badgeText.implicitWidth + 4)
@@ -2696,7 +2752,7 @@ Item {
         id: badgeText
         textFormat: Text.PlainText
         anchors.centerIn: parent
-        text: slot.ownIcon && slot.ownIcon.badge ? String(slot.ownIcon.badge) : ""
+        text: ownBadge.shownCount > 0 ? String(ownBadge.shownCount) : ""
         color: "#0b0b0b"
         font.family: root.monoFamily
         font.pixelSize: 8
