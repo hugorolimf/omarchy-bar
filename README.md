@@ -17,6 +17,9 @@ that keeps the bar tidy.
 - ✏️ **One icon language.** Thin monochrome strokes on a 24-unit grid, drawn by the
   bar over each widget (which still takes the clicks). Colour only when it means
   something: green charging, amber attention, red alert, blue in use, dim off.
+- 🎞️ **Icons that show their state.** The speaker's waves follow the volume and turn red
+  when muted, the Wi‑Fi bars follow the signal, the battery fills as it charges, the bell
+  slashes on Do Not Disturb, and every change eases in instead of jumping.
 - 💬 **Tips that explain.** Hover an icon for its name and value (`Sound · 65%`,
   `Wi‑Fi · MyNetwork`, `Battery · 3h20 left`); click for the full panel. Hovering
   never widens or moves anything. AI usage (Omarchy's agents widget) always shows
@@ -34,6 +37,11 @@ that keeps the bar tidy.
 
 Recorded on a real desktop, mouse and clicks included. The bar follows the
 system language; these takes are in Portuguese.
+
+**States**: mute the sound, switch Do Not Disturb on, open the tools drawer: each
+icon changes in place.
+
+![Icons changing state](assets/states.gif)
 
 **Tips on hover**: name and value, nothing moves.
 
@@ -53,7 +61,8 @@ the islands in place.
 
 ![Tools drawer](assets/drawer.gif)
 
-**Island Kit catalog**: the whole family, installed or one click away.
+**Island Kit catalog**: the whole family, installed or one click away, from the
+toolcase in its own pill.
 
 ![Catalog](assets/catalog.gif)
 
