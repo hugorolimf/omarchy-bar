@@ -684,13 +684,19 @@ Item {
     return slot ? String(slot.moduleName || "") : ""
   }
 
+  // Is `obj` this slot's widget? Panels register with the real widget, which
+  // sits in `inner` when the slot holds a thin entry (Entry.qml).
+  function slotHolds(slot, obj) {
+    return !!slot && !!obj && (slot.activeItem === obj || moduleState(slot.activeItem) === obj)
+  }
+
   function switchPanelFrom(owner, direction) {
     if (!owner) return false
 
     var currentSlot = null
     for (var i = 0; i < moduleSlots.length; i++) {
       var slot = moduleSlots[i]
-      if (slot && slot.activeItem === owner) {
+      if (slot && slotHolds(slot, owner)) {
         currentSlot = slot
         break
       }
@@ -711,7 +717,7 @@ Item {
 
     var step = direction < 0 ? -1 : 1
     var nextSlot = slots[(currentIndex + step + slots.length) % slots.length]
-    if (!nextSlot || !nextSlot.activeItem || nextSlot.activeItem === owner) return false
+    if (!nextSlot || !nextSlot.activeItem || slotHolds(nextSlot, owner)) return false
 
     nextSlot.activeItem.open()
     return true
@@ -1266,8 +1272,15 @@ Item {
   // grid, colour only where it says something (green ok/charging, amber
   // attention, red alert, blue in use, dim = off). Drawn by the bar over
   // the widget, which stays underneath invisible and still takes the clicks.
-  // iconFor returns { key, tone, badge, parts: [{ d, a (alpha), f (fill) }] }
-  // or null to keep the widget's own look.
+  // iconFor returns { key, fam, tone, badge, ring, spin, slash, cross,
+  // parts: [{ d, a (alpha), f (fill) }], blocks: [{ x, y, w, h, r, a, f }] }
+  // or null to keep the widget's own look. Within one `fam` the parts keep
+  // their places, so a state change only fades their alpha (Wi-Fi bars,
+  // volume waves); `blocks` are rectangles on the same grid that glide to
+  // their new size (battery level, brightness, switch knobs); `slash` draws a
+  // stroke across from the top left and `cross` grows the mute cross.
+  readonly property string slashPath: "M4 4l16 16"
+  readonly property string crossPath: "M16 9.5l5 5M21 9.5l-5 5"
   readonly property var easeCurve: [0.32, 0.72, 0, 1, 1, 1]
   readonly property string monoFamily: "JetBrainsMono Nerd Font"
   function circ(cx, cy, r) {
@@ -1315,7 +1328,13 @@ Item {
     phone: [rrect(6.5, 2.5, 11, 19, 2.8), "M10.5 5h3"],
     // two switches, one on and one off (the control-centre glyph)
     tools: ["M8 4.5h8a3 3 0 0 1 0 6H8a3 3 0 0 1 0-6z", "M16 6.1a1.4 1.4 0 1 0 0 2.8a1.4 1.4 0 1 0 0-2.8z", "M8 13.5h8a3 3 0 0 1 0 6H8a3 3 0 0 1 0-6z", "M8 15.1a1.4 1.4 0 1 0 0 2.8a1.4 1.4 0 1 0 0-2.8z"],
+    // the switches' tracks alone; the knobs are blocks that slide
+    toolTracks: ["M8 4.5h8a3 3 0 0 1 0 6H8a3 3 0 0 1 0-6z", "M8 13.5h8a3 3 0 0 1 0 6H8a3 3 0 0 1 0-6z"],
+    // Island Kit's catalog: three blocks and a round piece
+    kit: [rrect(4, 4, 7, 7, 1.8) + rrect(13, 4, 7, 7, 1.8) + rrect(4, 13, 7, 7, 1.8), circ(16.5, 16.5, 3.5)],
   })
+  // A knob of the tools glyph (stroked circle, r 1.4 on the path's centre).
+  function knobBlock(cx, cy) { return { x: cx - 2.3, y: cy - 2.3, w: 4.6, h: 4.6, r: 2.3, a: 1, f: false } }
   function partsOf(names, alpha, fill) {
     var out = []
     for (var i = 0; i < names.length; i++) {
@@ -1366,80 +1385,108 @@ Item {
     return m && clonedKinds.indexOf(m[1]) >= 0 ? "omarchy." + m[1] : c
   }
 
+  // The object a module's state is read from. A plugin's bar entry can be a
+  // thin loader (Entry.qml) that keeps the real widget in `inner`; every
+  // state read (iconFor, liveLabel) goes through here so both shapes work.
+  function moduleState(item) { return item && item.inner ? item.inner : item }
+
   function iconFor(id, item) {
-    if (!item) return null
+    item = moduleState(item)
+    // the entry's own "install Island Kit" button stays visible
+    if (!item || item.needsKit === true) return null
     try {
       if (id === "io.github.hugorolimf.iphone") {
-        // Phone outline; the battery fills it from the bottom.
+        // Phone outline; the battery fills it from the bottom and glides as
+        // it changes. Out of reach: dim and empty.
         var bat = typeof item.battery === "number" ? item.battery : -1
         var on = item.connected === true
-        var ph = partsOf(["phone"])
-        if (on && bat >= 0) ph = ph.concat([{ d: rrect(8.5, 17.5 - 11 * Math.min(1, bat / 100), 7, Math.max(0.6, 11 * Math.min(1, bat / 100)), 1), a: 0.85, f: true }])
-        return { key: "iphone" + (on ? Math.round(bat / 10) : "off"), tone: !on ? "dim" : bat >= 0 && bat < 10 ? "red" : bat >= 0 && bat < 20 ? "amber" : "",
-                 badge: on && item.unread > 0 ? item.unread : 0, parts: ph }
+        var lv = on && bat >= 0 ? Math.min(1, bat / 100) : 0
+        return { key: "iphone" + (on ? Math.round(bat / 10) : "off"), fam: "phone",
+                 tone: !on ? "dim" : bat >= 0 && bat < 10 ? "red" : bat >= 0 && bat < 20 ? "amber" : "",
+                 badge: on && item.unread > 0 ? item.unread : 0, parts: partsOf(["phone"]),
+                 blocks: [{ x: 8.5, y: 17.5 - 11 * lv, w: 7, h: Math.max(0.6, 11 * lv), r: 1, a: on && bat >= 0 ? 0.85 : 0, f: true }] }
       }
       // Do Not Disturb: the bell red and slashed. `ring` swings it (a clear).
-      if (id === "io.github.hugorolimf.inbox")
-        return item.dnd === true
-          ? { key: "bell-dnd", tone: "red", badge: item.unseen > 0 ? item.unseen : 0, ring: item.clearSerial || 0, parts: partsOf(["bell", "slash"]) }
-          : { key: "bell", tone: item.opened === true ? "blue" : "", badge: item.unseen > 0 ? item.unseen : 0, ring: item.clearSerial || 0, parts: partsOf(["bell"]) }
-      if (id === "io.github.hugorolimf.bar")
-        return { key: "tools", tone: root.drawerOpen || root.drawerEdit || item.opened === true ? "blue" : "", parts: partsOf(["tools"]) }
+      if (id === "io.github.hugorolimf.inbox") {
+        var dnd = item.dnd === true
+        return { key: dnd ? "bell-dnd" : "bell", fam: "bell", tone: dnd ? "red" : item.opened === true ? "blue" : "",
+                 badge: item.unseen > 0 ? item.unseen : 0, ring: item.clearSerial || 0, slash: dnd, parts: partsOf(["bell"]) }
+      }
+      // Two switches whose knobs swap sides while the drawer is open.
+      if (id === "io.github.hugorolimf.bar") {
+        var open = root.drawerOpen || root.drawerEdit
+        return { key: open ? "tools-open" : "tools", fam: "tools", tone: open || item.opened === true ? "blue" : "", parts: partsOf(["toolTracks"]),
+                 blocks: [knobBlock(open ? 8 : 16, 7.5), knobBlock(open ? 16 : 8, 16.5)] }
+      }
+      if (id === "io.github.hugorolimf.kit")
+        return { key: "kit", fam: "kit", tone: item.opened === true ? "blue" : "", parts: partsOf(["kit"]) }
+      // AI usage: the starburst turns once each time the share moves.
       if (id === "omarchy.agents") {
         var hl = item.headline
         var pc = hl && hl.percent >= 0 ? hl.percent : -1
-        return { key: "agents", always: pc >= 0, tone: pc >= 0.9 ? "red" : pc >= 0.7 ? "amber" : "", parts: partsOf(["agents"], 1, true) }
+        return { key: "agents", fam: "agents", always: pc >= 0, spin: pc >= 0 ? Math.round(pc * 100) : -1,
+                 tone: pc >= 0.9 ? "red" : pc >= 0.7 ? "amber" : "", parts: partsOf(["agents"], 1, true) }
       }
-      if (fixedShapes[id]) return { key: fixedShapes[id], parts: partsOf([fixedShapes[id]]) }
-      if (id === "omarchy.system-update") return { key: "update", tone: "amber", parts: partsOf(["update"]) }
-      if (id === "techspawn.projects") return { key: "projects", badge: item.attention > 0 ? item.attention : 0, parts: partsOf(["projects"]) }
+      if (fixedShapes[id]) return { key: fixedShapes[id], fam: fixedShapes[id], parts: partsOf([fixedShapes[id]]) }
+      if (id === "omarchy.system-update") return { key: "update", fam: "update", tone: "amber", parts: partsOf(["update"]) }
+      if (id === "techspawn.projects") return { key: "projects", fam: "projects", badge: item.attention > 0 ? item.attention : 0, parts: partsOf(["projects"]) }
       if (id === "omarchy.weather") {
         var g = paintedGlyph(item, 0)
         var w = g ? weatherShapes[g.charCodeAt(0).toString(16)] : ""
-        return w ? { key: "w-" + w, parts: partsOf([w]) } : null
+        // a new sky fades in (fam) instead of swapping
+        return w ? { key: "w-" + w, fam: "w-" + w, parts: partsOf([w]) } : null
       }
+      // Sound: the waves fade with the volume; muted, they go and a red
+      // cross grows beside the speaker.
       if (id === "omarchy.audio" && "outputVolume" in item) {
-        var v = item.outputVolume
-        if (item.outputMuted) return { key: "mute", tone: "dim", parts: partsOf(["speaker", "mute"]) }
-        var p = partsOf(["speaker"])
-        if (v > 0.001) p = p.concat(partsOf(["wave1"]))
-        p = p.concat(partsOf(["wave2"], v >= 0.5 ? 1 : 0.3))
-        return { key: "vol" + (v <= 0.001 ? 0 : v < 0.5 ? 1 : 2), parts: p }
+        var v = item.outputVolume, muted = item.outputMuted === true
+        return { key: muted ? "mute" : "vol" + (v <= 0.001 ? 0 : v < 0.5 ? 1 : 2), fam: "speaker", tone: muted ? "red" : "", cross: muted,
+                 parts: partsOf(["speaker"]).concat(partsOf(["wave1"], !muted && v > 0.001 ? 1 : 0),
+                                                    partsOf(["wave2"], muted || v <= 0.001 ? 0 : v >= 0.5 ? 1 : 0.3)) }
       }
+      // Network: cable; Wi-Fi bars lit by the signal; Wi-Fi on but joined to
+      // nothing: faint bars in amber; Wi-Fi switched off: red and slashed.
       if (id === "omarchy.network") {
-        if (item.kind === "ethernet") return { key: "lan", parts: partsOf(["lan"]) }
-        if (item.kind !== "wifi") return { key: "nowifi", tone: "dim", parts: partsOf(["wifi3", "wifi2", "wifi1"], 0.35).concat(partsOf(["slash"])) }
+        if (item.kind === "ethernet") return { key: "lan", fam: "lan", parts: partsOf(["lan"]) }
+        if (item.kind !== "wifi") {
+          var radioOff = item.wifiEnabled === false
+          return { key: radioOff ? "wifi-off" : "nowifi", fam: "wifi", tone: radioOff ? "red" : "amber", slash: radioOff,
+                   parts: partsOf(["wifi3", "wifi2", "wifi1"], radioOff ? 0.5 : 0.35).concat(partsOf(["wifidot"], radioOff ? 0.5 : 1, true)) }
+        }
         var sig = item.signalStrength > 0 ? item.signalStrength : 100
-        return { key: "wifi" + (sig < 34 ? 1 : sig < 67 ? 2 : 3),
+        return { key: "wifi" + (sig < 34 ? 1 : sig < 67 ? 2 : 3), fam: "wifi",
                  parts: partsOf(["wifi3"], sig >= 67 ? 1 : 0.3).concat(partsOf(["wifi2"], sig >= 34 ? 1 : 0.3), partsOf(["wifi1"]), partsOf(["wifidot"], 1, true)) }
       }
+      // Bluetooth: off = dim and slashed; a device connected = blue, with
+      // the two dots of a link either side.
       if (id === "omarchy.bluetooth" && "connectedDevices" in item) {
-        if (item.adapter && item.adapter.enabled === false) return { key: "bt-off", tone: "dim", parts: partsOf(["bluetooth"]) }
-        if ((item.connectedDevices || []).length > 0) return { key: "bt-on", tone: "blue", parts: partsOf(["bluetooth"]).concat(partsOf(["btdots"], 1, true)) }
-        return { key: "bt", parts: partsOf(["bluetooth"]) }
+        var btOff = !!item.adapter && item.adapter.enabled === false
+        var linked = !btOff && (item.connectedDevices || []).length > 0
+        return { key: btOff ? "bt-off" : linked ? "bt-on" : "bt", fam: "bt", tone: btOff ? "dim" : linked ? "blue" : "", slash: btOff,
+                 parts: partsOf(["bluetooth"]).concat(partsOf(["btdots"], linked ? 1 : 0, true)) }
       }
       if (id === "omarchy.microphone" && "muted" in item) {
-        if (item.muted) return { key: "mic-off", tone: "dim", parts: partsOf(["mic", "slash"]) }
-        return { key: item.inUse ? "mic-live" : "mic", tone: item.inUse ? "red" : "", parts: partsOf(["mic"]) }
+        if (item.muted) return { key: "mic-off", fam: "mic", tone: "dim", slash: true, parts: partsOf(["mic"]) }
+        return { key: item.inUse ? "mic-live" : "mic", fam: "mic", tone: item.inUse ? "red" : "", parts: partsOf(["mic"]) }
       }
       if (id === "omarchy.monitor") {
         // a screen on its stand (the weather keeps the sun); the light in it
-        // grows with the brightness
+        // grows with the brightness, and night light warms it amber
         var b = item.brightnessAvailable ? item.brightnessPercent : 50
         var r = 1 + Math.round(b / 100 * 4) * 0.4
-        return { key: "screen" + Math.round(r * 10),
-                 parts: partsOf(["screen"]).concat([{ d: circ(12, 10.5, r), a: 1, f: true }]) }
+        return { key: "screen" + Math.round(r * 10) + (item.nightlightOn === true ? "n" : ""), fam: "screen", tone: item.nightlightOn === true ? "amber" : "",
+                 parts: partsOf(["screen"]), blocks: [{ x: 12 - r, y: 10.5 - r, w: 2 * r, h: 2 * r, r: r, a: 1, f: true }] }
       }
       if ((id === "omarchy.power" || id === "io.github.hugorolimf.power")) {
+        // The level glides; plugged in it pales under a bolt and turns green.
         var d = UPower.displayDevice
         if (!d || !d.isLaptopBattery) return null
         var pct = d.percentage <= 1.0001 ? d.percentage * 100 : d.percentage
         var charging = d.state === UPowerDeviceState.Charging || d.state === UPowerDeviceState.FullyCharged
-        var fillW = Math.max(1, 12 * Math.min(1, pct / 100))
-        var parts = partsOf(["battery"]).concat([{ d: rrect(5, 9.5, fillW, 5, 1), a: charging ? 0.35 : 0.85, f: true }])
-        if (charging) parts = parts.concat(partsOf(["bolt"]))
         var tone = charging ? "green" : pct < 10 ? "red" : pct < 20 ? "amber" : ""
-        return { key: "bat" + Math.round(pct / 10) + (charging ? "c" : ""), tone: tone, parts: parts }
+        return { key: "bat" + Math.round(pct / 10) + (charging ? "c" : ""), fam: "battery", tone: tone,
+                 parts: partsOf(["battery"]).concat(partsOf(["bolt"], charging ? 1 : 0)),
+                 blocks: [{ x: 5, y: 9.5, w: Math.max(1, 12 * Math.min(1, pct / 100)), h: 5, r: 1, a: charging ? 0.35 : 0.85, f: true }] }
       }
     } catch (e) {}
     return null
@@ -1583,7 +1630,9 @@ Item {
         if (!nd.desc) nd.desc = tr("abrir")
         nd.desc = nd.desc.charAt(0).toUpperCase() + nd.desc.slice(1)
         var paths = []
-        if (icon && icon.parts) for (var j = 0; j < icon.parts.length; j++) paths.push(icon.parts[j].d)
+        if (icon && icon.parts) for (var j = 0; j < icon.parts.length; j++) if (!(icon.parts[j].a < 0.05)) paths.push(icon.parts[j].d)
+        if (icon && icon.slash) paths.push(slashPath)
+        if (icon && icon.cross) paths.push(crossPath)
         if (paths.length === 0 && toolExtraPaths[cid]) paths = toolExtraPaths[cid]
         if (paths.length === 0 && kind === "omarchy.weather") paths = shapes.cloud || []
         tools.push({ id: id, name: nd.name, desc: nd.desc, group: group, value: value,
@@ -1637,7 +1686,8 @@ Item {
   // Read from the widget itself where it already knows (volume, network,
   // Bluetooth, brightness) and from UPower for the battery.
   function liveLabel(id, item, hovered) {
-    if (!item) return ""
+    item = moduleState(item)
+    if (!item || item.needsKit === true) return ""
     try {
       if (id === "io.github.hugorolimf.inbox") {
         var u = item.unseen || 0
@@ -1672,6 +1722,7 @@ Item {
         if (item.info && item.info.ssid) return item.info.ssid
         if (wifiName !== "") return wifiName
         if (item.kind === "ethernet") return root.tr("Cabo")
+        if (item.kind !== "wifi" && item.wifiEnabled === false) return root.tr("Wi‑Fi desligado")
         return item.kind === "wifi" ? "Wi‑Fi" : root.tr("Sem conexão")
       }
       if (id === "omarchy.bluetooth" && "connectedDevices" in item) {
@@ -1681,7 +1732,12 @@ Item {
       }
       if (id === "omarchy.monitor" && item.brightnessAvailable) return item.brightnessPercent + "%"
       if (id === "omarchy.microphone" && "muted" in item) return item.muted ? root.tr("Mudo") : root.tr("Ligado")
-      if ((id === "omarchy.power" || id === "io.github.hugorolimf.power")) return batteryLabel()
+      // the power mode only when it is not the everyday one
+      if ((id === "omarchy.power" || id === "io.github.hugorolimf.power")) {
+        var mode = ({ "performance": root.tr("desempenho"), "max-power": root.tr("extremo"), "power-saver": root.tr("economia") })[item.activeProfile] || ""
+        var bl = batteryLabel()
+        return bl && mode ? bl + " · " + mode : (bl || mode)
+      }
     } catch (e) {}
     return ""
   }
@@ -1713,7 +1769,7 @@ Item {
   readonly property bool portuguese: Qt.locale().name.indexOf("pt") === 0
   readonly property var enTips: ({"omarchy.menu": "System menu — click to open · right-click opens a terminal", "yakumy.station": "Station — synced workspaces and displays", "omarchy.weather": "Weather — click for the forecast", "techspawn.projects": "Projects — your git repos: branch, changes, pull and push", "evindor.keystroke": "Keystroke — command palette for apps and actions", "omarchy.agents": "AI agents — limits and usage for Claude, Codex and others", "io.github.hugorolimf.dock": "Dock — dock settings", "io.github.fasi96.liquid-glass": "Liquid Glass — tune the terminals' glass", "omaplug": "Plugins — enable, disable and update plugins", "omarchy.system-update": "Updates available — click to update the system", "omarchy.bluetooth": "Bluetooth — click to see and connect devices · right-click toggles it", "omarchy.network": "Wi‑Fi and network — click to see networks", "omarchy.audio": "Sound — click for volume and outputs · scroll to adjust · right-click mutes", "omarchy.monitor": "Display — brightness and monitors", "omarchy.power": "Battery and power — click for details and power modes", "io.github.hugorolimf.power": "Battery and power — click for details and power modes", "omarchy.tailscale": "Tailscale — private network", "io.github.hugorolimf.clock": "Calendar — click to open", "io.github.hugorolimf.iphone": "iPhone — click to see your messages", "io.github.hugorolimf.bar": "Tools — open and organise the bar's plugins", "io.github.hugorolimf.inbox": "Notifications — history grouped by app", "io.github.hugorolimf.monitores": "Arrange displays — drag screens, resolution, scale and rotation"})
   readonly property var enExtraTips: ({"omarchy.microphone": "Microphone — mute and unmute the microphone", "omarchy.keyboard-layout": "Keyboard — switch the keyboard layout", "io.github.hugorolimf.island": "Island Notch — dictation, music, recording and alerts in the notch"})
-  readonly property var enText: ({" nova": " new", " novas": " new", "nenhuma nova": "nothing new", "não perturbe": "do not disturb", "fora de alcance": "out of range", " não lida": " unread", " não lidas": " unread", " · zera em ": " · resets in ", "Mudo": "Muted", "Cabo": "Wired", "Sem conexão": "Offline", "Conectado": "Connected", "Desligado": "Off", "Nenhum aparelho": "No devices", "Ligado": "On", " · carregando": " · charging", ", cheia em ": ", full in ", " · carregada": " · charged", " restantes": " left", "data, hora e o calendário do mês": "date, time and the month's calendar", "abrir": "open", "Na gaveta  ·  clique para fixar na barra": "In the drawer  ·  click to pin it to the bar", "Fixo na barra  ·  clique para guardar na gaveta": "Pinned to the bar  ·  click to keep it in the drawer"})
+  readonly property var enText: ({" nova": " new", " novas": " new", "nenhuma nova": "nothing new", "não perturbe": "do not disturb", "fora de alcance": "out of range", " não lida": " unread", " não lidas": " unread", " · zera em ": " · resets in ", "Mudo": "Muted", "desempenho": "performance", "economia": "power saver", "extremo": "extreme", "Wi‑Fi desligado": "Wi‑Fi off", "Cabo": "Wired", "Sem conexão": "Offline", "Conectado": "Connected", "Desligado": "Off", "Nenhum aparelho": "No devices", "Ligado": "On", " · carregando": " · charging", ", cheia em ": ", full in ", " · carregada": " · charged", " restantes": " left", "data, hora e o calendário do mês": "date, time and the month's calendar", "abrir": "open", "Na gaveta  ·  clique para fixar na barra": "In the drawer  ·  click to pin it to the bar", "Fixo na barra  ·  clique para guardar na gaveta": "Pinned to the bar  ·  click to keep it in the drawer"})
   function tr(text) { return portuguese || enText[text] === undefined ? text : enText[text] }
   function tipFor(id) { return (portuguese ? ptTips[id] : enTips[id]) || "" }
   function extraTipFor(id) { return (portuguese ? toolExtraTips[id] : enExtraTips[id]) || "" }
@@ -2492,7 +2548,7 @@ Item {
     }
     readonly property bool hovered: moduleHover.hovered
     readonly property bool dragSource: root.barDragSource === slot
-    readonly property bool panelOpen: root.activePopout === slot.activeItem
+    readonly property bool panelOpen: root.slotHolds(slot, root.activePopout)
     // Modules bigger than the mark they want (a text label in a padded slot,
     // a multi-line stack on a vertical bar) can say how long the open-panel
     // dot should be along the bar, so it tracks what the module paints
@@ -2642,24 +2698,40 @@ Item {
 
     // The bar's own icon (root.iconFor), drawn in strokes; it lifts a little
     // on hover and pops when its state changes (volume step, Wi-Fi bars...).
+    // Parts fade, blocks glide and the slash or cross draw themselves in, so
+    // a change of state reads as a movement, not a swap.
     Item {
       id: ownGlyph
       visible: !!slot.ownIcon
       readonly property real size: 16
-      readonly property var parts: slot.ownIcon ? slot.ownIcon.parts : []
+      readonly property var icon: slot.ownIcon
+      readonly property var parts: icon ? icon.parts || [] : []
+      readonly property var blocks: icon ? icon.blocks || [] : []
       // a new tone (red, blue…) eases in instead of switching
-      property color ink: root.toneColor(slot.ownIcon ? slot.ownIcon.tone : "")
+      property color ink: root.toneColor(icon ? icon.tone : "")
       Behavior on ink { ColorAnimation { duration: 320; easing.type: Easing.Bezier; easing.bezierCurve: root.easeCurve } }
-      readonly property string key: slot.ownIcon ? slot.ownIcon.key : ""
+      readonly property string key: icon ? icon.key : ""
+      readonly property string fam: icon ? icon.fam || icon.key : ""
       // `ring` going up swings the icon from its top, damped (the bell when
       // notifications are cleared)
-      readonly property int ring: slot.ownIcon && slot.ownIcon.ring ? slot.ownIcon.ring : 0
+      readonly property int ring: icon && icon.ring ? icon.ring : 0
       property int ringSeen: 0
       onRingChanged: {
         if (ring > ringSeen) iconRing.restart()
         ringSeen = ring
       }
-      transform: Rotation { id: glyphSwing; origin.x: ownGlyph.size / 2; origin.y: 1.5; angle: 0 }
+      // `spin` changing turns the glyph once round its centre (AI usage
+      // moving); -1 = nothing to report yet
+      readonly property int spin: icon && icon.spin !== undefined ? icon.spin : -1
+      property int spinSeen: -1
+      onSpinChanged: {
+        if (spin >= 0 && spinSeen >= 0 && spin !== spinSeen) iconSpin.restart()
+        spinSeen = spin
+      }
+      transform: [
+        Rotation { id: glyphSwing; origin.x: ownGlyph.size / 2; origin.y: 1.5; angle: 0 },
+        Rotation { id: glyphTurn; origin.x: ownGlyph.size / 2; origin.y: ownGlyph.size / 2; angle: 0 }
+      ]
       SequentialAnimation {
         id: iconRing
         NumberAnimation { target: glyphSwing; property: "angle"; to: -18; duration: 90; easing.type: Easing.OutCubic }
@@ -2668,6 +2740,7 @@ Item {
         NumberAnimation { target: glyphSwing; property: "angle"; to: 5; duration: 130; easing.type: Easing.InOutSine }
         NumberAnimation { target: glyphSwing; property: "angle"; to: 0; duration: 180; easing.type: Easing.OutCubic }
       }
+      NumberAnimation { id: iconSpin; target: glyphTurn; property: "angle"; from: 0; to: 360; duration: 900; easing.type: Easing.Bezier; easing.bezierCurve: root.easeCurve }
       width: size
       height: size
       x: (slot.baseWidth - size) / 2
@@ -2675,43 +2748,64 @@ Item {
       opacity: slot.dragSource ? 0.22 : 1.0
       scale: 1
       Behavior on y { NumberAnimation { duration: 350; easing.type: Easing.Bezier; easing.bezierCurve: root.easeCurve } }
-      onKeyChanged: if (key !== "") iconPop.restart()
+      // same drawing, new state: a small pop; another drawing (Wi-Fi to
+      // cable, a new sky): it fades in as it pops
+      property string famSeen: ""
+      onKeyChanged: {
+        if (key === "") return
+        if (famSeen !== "" && fam !== famSeen) { glyphBody.opacity = 0; famFade.restart() }
+        famSeen = fam
+        iconPop.restart()
+      }
       SequentialAnimation {
         id: iconPop
-        NumberAnimation { target: ownGlyph; property: "scale"; to: 0.78; duration: 90; easing.type: Easing.InCubic }
-        NumberAnimation { target: ownGlyph; property: "scale"; to: 1; duration: 380; easing.type: Easing.Bezier; easing.bezierCurve: root.easeCurve }
+        NumberAnimation { target: ownGlyph; property: "scale"; to: 0.82; duration: 90; easing.type: Easing.InCubic }
+        NumberAnimation { target: ownGlyph; property: "scale"; to: 1; duration: 420; easing.type: Easing.Bezier; easing.bezierCurve: root.easeCurve }
       }
+      NumberAnimation { id: famFade; target: glyphBody; property: "opacity"; to: 1; duration: 360; easing.type: Easing.Bezier; easing.bezierCurve: root.easeCurve }
 
-      Shape {
+      Item {
+        id: glyphBody
         width: 24
         height: 24
         scale: ownGlyph.size / 24
         transformOrigin: Item.TopLeft
-        preferredRendererType: Shape.CurveRenderer
-        ShapePath { id: sp0; readonly property var part: ownGlyph.parts[0]; strokeWidth: 1.8; capStyle: ShapePath.RoundCap; joinStyle: ShapePath.RoundJoin
-          strokeColor: part && !part.f ? Qt.rgba(ownGlyph.ink.r, ownGlyph.ink.g, ownGlyph.ink.b, part.a) : "transparent"
-          fillColor: part && part.f ? Qt.rgba(ownGlyph.ink.r, ownGlyph.ink.g, ownGlyph.ink.b, part.a) : "transparent"
-          PathSvg { path: sp0.part ? sp0.part.d : "" } }
-        ShapePath { id: sp1; readonly property var part: ownGlyph.parts[1]; strokeWidth: 1.8; capStyle: ShapePath.RoundCap; joinStyle: ShapePath.RoundJoin
-          strokeColor: part && !part.f ? Qt.rgba(ownGlyph.ink.r, ownGlyph.ink.g, ownGlyph.ink.b, part.a) : "transparent"
-          fillColor: part && part.f ? Qt.rgba(ownGlyph.ink.r, ownGlyph.ink.g, ownGlyph.ink.b, part.a) : "transparent"
-          PathSvg { path: sp1.part ? sp1.part.d : "" } }
-        ShapePath { id: sp2; readonly property var part: ownGlyph.parts[2]; strokeWidth: 1.8; capStyle: ShapePath.RoundCap; joinStyle: ShapePath.RoundJoin
-          strokeColor: part && !part.f ? Qt.rgba(ownGlyph.ink.r, ownGlyph.ink.g, ownGlyph.ink.b, part.a) : "transparent"
-          fillColor: part && part.f ? Qt.rgba(ownGlyph.ink.r, ownGlyph.ink.g, ownGlyph.ink.b, part.a) : "transparent"
-          PathSvg { path: sp2.part ? sp2.part.d : "" } }
-        ShapePath { id: sp3; readonly property var part: ownGlyph.parts[3]; strokeWidth: 1.8; capStyle: ShapePath.RoundCap; joinStyle: ShapePath.RoundJoin
-          strokeColor: part && !part.f ? Qt.rgba(ownGlyph.ink.r, ownGlyph.ink.g, ownGlyph.ink.b, part.a) : "transparent"
-          fillColor: part && part.f ? Qt.rgba(ownGlyph.ink.r, ownGlyph.ink.g, ownGlyph.ink.b, part.a) : "transparent"
-          PathSvg { path: sp3.part ? sp3.part.d : "" } }
-        ShapePath { id: sp4; readonly property var part: ownGlyph.parts[4]; strokeWidth: 1.8; capStyle: ShapePath.RoundCap; joinStyle: ShapePath.RoundJoin
-          strokeColor: part && !part.f ? Qt.rgba(ownGlyph.ink.r, ownGlyph.ink.g, ownGlyph.ink.b, part.a) : "transparent"
-          fillColor: part && part.f ? Qt.rgba(ownGlyph.ink.r, ownGlyph.ink.g, ownGlyph.ink.b, part.a) : "transparent"
-          PathSvg { path: sp4.part ? sp4.part.d : "" } }
-        ShapePath { id: sp5; readonly property var part: ownGlyph.parts[5]; strokeWidth: 1.8; capStyle: ShapePath.RoundCap; joinStyle: ShapePath.RoundJoin
-          strokeColor: part && !part.f ? Qt.rgba(ownGlyph.ink.r, ownGlyph.ink.g, ownGlyph.ink.b, part.a) : "transparent"
-          fillColor: part && part.f ? Qt.rgba(ownGlyph.ink.r, ownGlyph.ink.g, ownGlyph.ink.b, part.a) : "transparent"
-          PathSvg { path: sp5.part ? sp5.part.d : "" } }
+
+        GlyphBlock { spec: ownGlyph.blocks[0]; ink: ownGlyph.ink; curve: root.easeCurve }
+        GlyphBlock { spec: ownGlyph.blocks[1]; ink: ownGlyph.ink; curve: root.easeCurve }
+        GlyphBlock { spec: ownGlyph.blocks[2]; ink: ownGlyph.ink; curve: root.easeCurve }
+
+        Shape {
+          anchors.fill: parent
+          preferredRendererType: Shape.CurveRenderer
+          GlyphPart { part: ownGlyph.parts[0]; ink: ownGlyph.ink; curve: root.easeCurve }
+          GlyphPart { part: ownGlyph.parts[1]; ink: ownGlyph.ink; curve: root.easeCurve }
+          GlyphPart { part: ownGlyph.parts[2]; ink: ownGlyph.ink; curve: root.easeCurve }
+          GlyphPart { part: ownGlyph.parts[3]; ink: ownGlyph.ink; curve: root.easeCurve }
+          GlyphPart { part: ownGlyph.parts[4]; ink: ownGlyph.ink; curve: root.easeCurve }
+          GlyphPart { part: ownGlyph.parts[5]; ink: ownGlyph.ink; curve: root.easeCurve }
+          GlyphPart { part: ownGlyph.parts[6]; ink: ownGlyph.ink; curve: root.easeCurve }
+          GlyphPart { part: ownGlyph.parts[7]; ink: ownGlyph.ink; curve: root.easeCurve }
+        }
+
+        // the slash draws across from the top left (Do Not Disturb, radio off)
+        GlyphMark {
+          path: root.slashPath
+          on: !!(ownGlyph.icon && ownGlyph.icon.slash)
+          originX: 4
+          originY: 4
+          ink: ownGlyph.ink
+          curve: root.easeCurve
+        }
+        // the mute cross grows from its own centre
+        GlyphMark {
+          path: root.crossPath
+          on: !!(ownGlyph.icon && ownGlyph.icon.cross)
+          originX: 18.5
+          originY: 12
+          ink: ownGlyph.ink
+          curve: root.easeCurve
+        }
       }
     }
     // The count pops in, bumps when it changes and shrinks away at zero
@@ -2945,6 +3039,79 @@ Item {
     Component {
       id: customCommandModuleComponent
       CustomCommandModule { entry: slot.entry }
+    }
+  }
+
+  // ---- Pieces of the bar's own icons (ModuleSlot's ownGlyph), on the
+  // 24-unit grid. Inline components do not see the bar's scope, so the ink
+  // and the easing curve come in as properties.
+
+  // One stroke (or filled) part; its alpha eases, so parts fade in and out.
+  component GlyphPart: ShapePath {
+    id: gp
+    property var part: null
+    property color ink: "white"
+    property var curve: [0.32, 0.72, 0, 1, 1, 1]
+    property real alpha: part ? part.a : 0
+    Behavior on alpha { NumberAnimation { duration: 300; easing.type: Easing.Bezier; easing.bezierCurve: gp.curve } }
+    strokeWidth: 1.8
+    capStyle: ShapePath.RoundCap
+    joinStyle: ShapePath.RoundJoin
+    strokeColor: part && !part.f ? Qt.rgba(ink.r, ink.g, ink.b, alpha) : "transparent"
+    fillColor: part && part.f ? Qt.rgba(ink.r, ink.g, ink.b, alpha) : "transparent"
+    PathSvg { path: gp.part ? gp.part.d : "" }
+  }
+
+  // A rectangle that glides to its new place and size (battery level,
+  // brightness, a switch knob); `f` false draws it as a ring.
+  component GlyphBlock: Rectangle {
+    id: gb
+    property var spec: null
+    property color ink: "white"
+    property var curve: [0.32, 0.72, 0, 1, 1, 1]
+    x: spec ? spec.x : 12
+    y: spec ? spec.y : 12
+    width: spec ? spec.w : 0
+    height: spec ? spec.h : 0
+    radius: spec ? Math.min(spec.r, Math.min(width, height) / 2) : 0
+    visible: !!spec
+    opacity: spec ? spec.a : 0
+    antialiasing: true
+    color: spec && spec.f ? ink : "transparent"
+    border.width: spec && !spec.f ? 1.8 : 0
+    border.color: ink
+    Behavior on x { NumberAnimation { duration: 420; easing.type: Easing.Bezier; easing.bezierCurve: gb.curve } }
+    Behavior on y { NumberAnimation { duration: 420; easing.type: Easing.Bezier; easing.bezierCurve: gb.curve } }
+    Behavior on width { NumberAnimation { duration: 420; easing.type: Easing.Bezier; easing.bezierCurve: gb.curve } }
+    Behavior on height { NumberAnimation { duration: 420; easing.type: Easing.Bezier; easing.bezierCurve: gb.curve } }
+    Behavior on opacity { NumberAnimation { duration: 300; easing.type: Easing.Bezier; easing.bezierCurve: gb.curve } }
+  }
+
+  // A mark over the glyph (the slash, the mute cross): it grows out from
+  // (originX, originY) as it fades in, and folds back the same way.
+  component GlyphMark: Shape {
+    id: gm
+    property string path: ""
+    property bool on: false
+    property real originX: 12
+    property real originY: 12
+    property color ink: "white"
+    property var curve: [0.32, 0.72, 0, 1, 1, 1]
+    property real grow: on ? 1 : 0
+    Behavior on grow { NumberAnimation { duration: 360; easing.type: Easing.Bezier; easing.bezierCurve: gm.curve } }
+    width: 24
+    height: 24
+    visible: grow > 0.01
+    opacity: Math.min(1, grow * 1.6)
+    preferredRendererType: Shape.CurveRenderer
+    transform: Scale { origin.x: gm.originX; origin.y: gm.originY; xScale: 0.15 + 0.85 * gm.grow; yScale: 0.15 + 0.85 * gm.grow }
+    ShapePath {
+      strokeWidth: 1.8
+      capStyle: ShapePath.RoundCap
+      joinStyle: ShapePath.RoundJoin
+      strokeColor: gm.ink
+      fillColor: "transparent"
+      PathSvg { path: gm.path }
     }
   }
 
