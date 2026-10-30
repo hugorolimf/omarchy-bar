@@ -55,7 +55,6 @@ Panel {
   // Background plugins: name, what they do and an icon, in both languages.
   readonly property var pluginInfo: ({
     "io.github.hugorolimf.alttab": { name: pt ? "Alt+Tab" : "Alt+Tab", desc: pt ? "Trocar de janela com miniaturas" : "Switch windows with thumbnails", path: "M4 7h11v9H4zM9 4h11v9h-2" },
-    "io.github.hugorolimf.notifications": { name: pt ? "Notificações" : "Notifications", desc: pt ? "Cartões, histórico e Não perturbe" : "Cards, history and Do Not Disturb", path: Anatomy.icons.bell },
     "io.github.sirjul1337.lock-explorer": { name: pt ? "Tela de bloqueio" : "Lock screen", desc: pt ? "Escolher, pré-visualizar e criar designs" : "Pick, preview and design lock screens", path: Anatomy.icons.lock },
     "fkcodes.key-promoter": { name: pt ? "Dica de atalhos" : "Shortcut hints", desc: pt ? "Mostra o atalho do que você acabou de clicar" : "Shows the shortcut for what you just clicked", path: Anatomy.icons.keyboard },
     "io.github.hugorolimf.onboarding": { name: pt ? "Primeiros passos" : "First steps", desc: pt ? "Guia com os atalhos essenciais" : "Guide with the essential shortcuts", path: Anatomy.icons.sparkle },
@@ -143,7 +142,7 @@ Panel {
 
   // ---- removing a plugin from the system (omarchy plugin remove), with a
   // second click to confirm. The pieces the desktop stands on are kept.
-  readonly property var protectedPlugins: [selfId, "io.github.hugorolimf.kit", "io.github.hugorolimf.island", "io.github.hugorolimf.notifications", "io.github.hugorolimf.osd", "io.github.hugorolimf.inbox"]
+  readonly property var protectedPlugins: [selfId, "io.github.hugorolimf.kit", "io.github.hugorolimf.island", "io.github.hugorolimf.osd", "io.github.hugorolimf.inbox"]
   property string confirmRemove: ""
   function pluginInfoFor(id) {
     for (var i = 0; i < plugins.length; i++) if (plugins[i].id === id) return plugins[i]
