@@ -1330,8 +1330,9 @@ Item {
     tools: ["M8 4.5h8a3 3 0 0 1 0 6H8a3 3 0 0 1 0-6z", "M16 6.1a1.4 1.4 0 1 0 0 2.8a1.4 1.4 0 1 0 0-2.8z", "M8 13.5h8a3 3 0 0 1 0 6H8a3 3 0 0 1 0-6z", "M8 15.1a1.4 1.4 0 1 0 0 2.8a1.4 1.4 0 1 0 0-2.8z"],
     // the switches' tracks alone; the knobs are blocks that slide
     toolTracks: ["M8 4.5h8a3 3 0 0 1 0 6H8a3 3 0 0 1 0-6z", "M8 13.5h8a3 3 0 0 1 0 6H8a3 3 0 0 1 0-6z"],
-    // Island Kit's catalog: three blocks and a round piece
-    kit: [rrect(4, 4, 7, 7, 1.8) + rrect(13, 4, 7, 7, 1.8) + rrect(4, 13, 7, 7, 1.8), circ(16.5, 16.5, 3.5)],
+    // Island Kit's catalog: a toolcase whose handle is the notch's pill; the
+    // latch is a block that slides
+    kit: [rrect(2.8, 8, 18.4, 12.2, 3), "M8 8V6.2a1.8 1.8 0 0 1 1.8-1.8h4.4A1.8 1.8 0 0 1 16 6.2V8", "M2.8 13h7.2M14 13h7.2"],
   })
   // A knob of the tools glyph (stroked circle, r 1.4 on the path's centre).
   function knobBlock(cx, cy) { return { x: cx - 2.3, y: cy - 2.3, w: 4.6, h: 4.6, r: 2.3, a: 1, f: false } }
@@ -1418,8 +1419,12 @@ Item {
         return { key: open ? "tools-open" : "tools", fam: "tools", tone: open || item.opened === true ? "blue" : "", parts: partsOf(["toolTracks"]),
                  blocks: [knobBlock(open ? 8 : 16, 7.5), knobBlock(open ? 16 : 8, 16.5)] }
       }
-      if (id === "io.github.hugorolimf.kit")
-        return { key: "kit", fam: "kit", tone: item.opened === true ? "blue" : "", parts: partsOf(["kit"]) }
+      // The case's latch drops open while the catalog is open.
+      if (id === "io.github.hugorolimf.kit") {
+        var kitOpen = item.opened === true
+        return { key: kitOpen ? "kit-open" : "kit", fam: "kit", tone: kitOpen ? "blue" : "", parts: partsOf(["kit"]),
+                 blocks: [{ x: 10, y: kitOpen ? 13.4 : 11.6, w: 4, h: 2.8, r: 1.4, a: 1, f: false }] }
+      }
       // AI usage: the starburst turns once each time the share moves.
       if (id === "omarchy.agents") {
         var hl = item.headline
