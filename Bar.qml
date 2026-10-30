@@ -2599,6 +2599,25 @@ Item {
     opacity: (baseWidth > 0 ? 1 : 0) * drawerShow * (root.drawerEdit && inDrawer ? 0.55 : 1)
     Behavior on opacity { NumberAnimation { duration: 200 } }
 
+    // Island Kit stands apart: its own pill, tinted, a touch brighter while
+    // the catalog is open.
+    Rectangle {
+      readonly property bool isKit: root.canon(slot.moduleName) === "io.github.hugorolimf.kit"
+      readonly property bool kitOpen: isKit && slot.activeItem && slot.activeItem.opened === true
+      visible: isKit && slot.width > 0
+      anchors.verticalCenter: parent.verticalCenter
+      // a little wider than the icon, so it reads as a pill, not a dot
+      x: -Style.space(3)
+      width: parent.width + Style.space(6)
+      height: Math.max(0, root.barSize - Style.space(6))
+      radius: height / 2
+      color: Qt.rgba(0.42, 0.61, 1, kitOpen ? 0.22 : moduleHover.hovered ? 0.16 : 0.10)
+      border.width: 0.8
+      border.color: Qt.rgba(0.42, 0.61, 1, kitOpen ? 0.6 : 0.32)
+      Behavior on color { ColorAnimation { duration: 250; easing.type: Easing.Bezier; easing.bezierCurve: root.easeCurve } }
+      Behavior on border.color { ColorAnimation { duration: 250; easing.type: Easing.Bezier; easing.bezierCurve: root.easeCurve } }
+    }
+
     // Soft highlight behind the hovered icon.
     Rectangle {
       anchors.verticalCenter: parent.verticalCenter
